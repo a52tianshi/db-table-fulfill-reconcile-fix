@@ -4,6 +4,13 @@
 
 被测对象就是库本身：`cmd/e2e/reconcile.go` 用 `mysqltable.NewPair` + `reconcile.New` 接入，`internal/store` 只有表结构、`Schema` 映射、分表规则、雪花 ID 和数据分布。writer（模拟线上双写）与 verify（独立逐行比对）不依赖库。
 
+## 两类测试
+
+| 测试 | 运行 | 覆盖 |
+|---|---|---|
+| `mysqltable_it/` 集成测试 | `go test ./...` | 库的 MySQL 实现：空表和页边界上的分页扫描、同一游标重复请求、扫描上限、雪花大整数 ID、按分表路由的批量查询、分片批量插入、主键冲突映射为 `ErrConflict`、回滚、整行更新、行锁确实生效，以及用互不整除的小参数完整跑两轮。MySQL 连不上时自动跳过 |
+| `run.sh` 端到端测试 | `./run.sh` | 下面的 6 步流程：持续双写、三轮核对、停机逐行比对 |
+
 ## 模型
 
 - 老表 `orders_old` 1 张，新表 `orders_new_00`…`orders_new_99` 100 张，结构相同，按 `user_id % 100` 分表。
@@ -57,6 +64,7 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 cd e2e
 ./run.sh                                     # 默认本机 root@tcp(127.0.0.1:3306)/reconcile_e2e
 ROWS=200000 WORKERS=16 GAP=20 ./run.sh       # 加大规模
+PAGE=97 BATCH=250 TX_BATCH=17 MEMORY_LIMIT=8000 FAIL_RATE=0.05 ./run.sh  # 互不整除的小参数 + 内存上限 + 5% 故障
 INIT_ARGS="-copy-ratio 0.5 -dirty-ratio 0.3" ./run.sh   # 预置部分新表数据(含旧值)，覆盖"不同→覆盖"分支
 E2E_MYSQL_DSN='user:pass@tcp(host:3306)/db' ./run.sh
 

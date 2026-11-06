@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 )
@@ -10,7 +11,9 @@ type CompareFunc[T any] func(old, new T) []string
 
 func (f CompareFunc[T]) Diff(old, new T) []string { return f(old, new) }
 
-// Exact treats rows as consistent only when old == new.
+// Exact treats rows as consistent only when old == new. Beware: == on a
+// time.Time compares *Location and the monotonic clock, not the instant; use
+// Struct for rows with time fields.
 func Exact[T comparable]() Comparator[T] {
 	return CompareFunc[T](func(old, new T) []string {
 		if old == new {
@@ -54,8 +57,11 @@ func Fields[T any](fields ...Field[T]) Comparator[T] {
 	})
 }
 
-// Struct compares every exported field of struct T with reflect.DeepEqual,
-// except the field names in ignore (allowed to differ). A Field in custom
+// Struct compares every exported field of struct T, except the field names
+// in ignore (allowed to differ). Per field: a type with an Equal(T) bool
+// method (time.Time: same instant, regardless of Location or monotonic
+// clock) uses it; []byte treats nil and empty as equal; anything else uses
+// reflect.DeepEqual. A Field in custom
 // replaces the default comparison of the struct field with the same Name
 // (e.g. Within for a timestamp). Unknown names are an error, so a typo can
 // never silently disable a comparison.
@@ -82,6 +88,7 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 		name   string
 		index  int
 		custom func(T, T) bool
+		equal  func(a, b reflect.Value) bool
 	}
 	var fields []field
 	for i := 0; i < rt.NumField(); i++ {
@@ -92,7 +99,7 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 		if !sf.IsExported() {
 			return nil, fmt.Errorf("Struct: unexported field %q must be ignored or the type must use Fields", sf.Name)
 		}
-		fields = append(fields, field{sf.Name, i, over[sf.Name].Equal})
+		fields = append(fields, field{sf.Name, i, over[sf.Name].Equal, valueEqual(sf.Type)})
 	}
 	return CompareFunc[T](func(old, new T) []string {
 		var diff []string
@@ -102,7 +109,7 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 			if f.custom != nil {
 				eq = f.custom(old, new)
 			} else {
-				eq = reflect.DeepEqual(a.Field(f.index).Interface(), b.Field(f.index).Interface())
+				eq = f.equal(a.Field(f.index), b.Field(f.index))
 			}
 			if !eq {
 				diff = append(diff, f.name)
@@ -110,4 +117,17 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 		}
 		return diff
 	}), nil
+}
+
+// valueEqual picks how two values of type t are compared.
+func valueEqual(t reflect.Type) func(a, b reflect.Value) bool {
+	if m, ok := t.MethodByName("Equal"); ok && m.Type.NumIn() == 2 && m.Type.In(1) == t &&
+		m.Type.NumOut() == 1 && m.Type.Out(0).Kind() == reflect.Bool {
+		fn := m.Func // resolved once, not per row
+		return func(a, b reflect.Value) bool { return fn.Call([]reflect.Value{a, b})[0].Bool() }
+	}
+	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+		return func(a, b reflect.Value) bool { return bytes.Equal(a.Bytes(), b.Bytes()) }
+	}
+	return func(a, b reflect.Value) bool { return reflect.DeepEqual(a.Interface(), b.Interface()) }
 }

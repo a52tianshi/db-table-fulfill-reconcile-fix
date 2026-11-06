@@ -10,6 +10,8 @@ import (
 )
 
 // ErrInjected looks like a MySQL deadlock so IsTransient retries it.
+//
+//lint:ignore ST1005 must match the MySQL driver message format
 var ErrInjected = errors.New("Error 1213 (40001): injected deadlock")
 
 // Chaos fails a fraction of calls BEFORE they reach MySQL, to exercise the

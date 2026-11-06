@@ -12,6 +12,8 @@ INSERT_RATIO=${INSERT_RATIO:-0.3}
 WARMUP=${WARMUP:-3}           # seconds of traffic before step 3
 GAP=${GAP:-10}                # seconds between step 3 and step 4
 BATCH=${BATCH:-1000}
+TX_BATCH=${TX_BATCH:-200}     # keys per recheck / insert transaction
+MEMORY_LIMIT=${MEMORY_LIMIT:--1}  # bytes buffered per batch (-1 = none)
 PAGE=${PAGE:-1000}           # keyset scan page for old and new tables
 DIST=${DIST:-skew}            # skew | uniform
 INSERT_MODE=${INSERT_MODE:-batch-snapshot}  # per-row | batch-locked | batch-snapshot
@@ -34,7 +36,7 @@ kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
 tail -n 2 logs/writer.log
 
 step "3. 第一轮核对修复 (期望大量插入)"
-bin/e2e reconcile -label run1 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" -expect-repairs
+bin/e2e reconcile -label run1 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -tx-batch "$TX_BATCH" -memory-limit "$MEMORY_LIMIT" -fail-rate "$FAIL_RATE" -expect-repairs
 
 # batch-snapshot may leave rows stale (updated between scan and insert); run2
 # must then overwrite them (different>0 allowed) but find nothing missing.
@@ -42,11 +44,11 @@ if [ "$INSERT_MODE" = batch-snapshot ]; then RUN2_EXPECT=-expect-no-missing; els
 step "4. 等待 ${GAP}s 后第二轮 ($RUN2_EXPECT, 写入仍在进行)"
 sleep "$GAP"
 kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
-bin/e2e reconcile -label run2 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" $RUN2_EXPECT
+bin/e2e reconcile -label run2 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -tx-batch "$TX_BATCH" -memory-limit "$MEMORY_LIMIT" -fail-rate "$FAIL_RATE" $RUN2_EXPECT
 
 step "4b. 第三轮 (必须 0 修复, 写入仍在进行: 证明已收敛)"
 kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
-bin/e2e reconcile -label run3 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" -expect-clean
+bin/e2e reconcile -label run3 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -tx-batch "$TX_BATCH" -memory-limit "$MEMORY_LIMIT" -fail-rate "$FAIL_RATE" -expect-clean
 
 step "5. 停机: 停止所有写入"
 kill -TERM "$WRITER"

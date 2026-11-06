@@ -105,8 +105,8 @@ flowchart LR
 
 | 写法 | 含义 |
 |---|---|
-| `r.Exact[T]()` | 整行 `==` 才算一致 |
-| `r.Struct[T](ignore, custom...)` | **推荐**。比较所有导出字段，`ignore` 中的字段允许不同；`custom` 覆盖某个字段的比较方式。字段名拼错会直接报错，不会悄悄漏比 |
+| `r.Exact[T]()` | 整行 `==` 才算一致。注意：含 `time.Time` 字段时不要用（`==` 会比较时区指针和单调时钟） |
+| `r.Struct[T](ignore, custom...)` | **推荐**。比较所有导出字段，`ignore` 中的字段允许不同；`custom` 覆盖某个字段的比较方式。字段名拼错会直接报错，不会悄悄漏比。按值比较：`time.Time` 用 `Equal`（同一时刻即相等，不管时区和单调时钟），`[]byte` 中 nil 与空视为相等 |
 | `r.Fields(fields...)` | 只比较列出的字段，没列出的都允许不同 |
 | `r.Eq(name, get)` | 字段精确相等 |
 | `r.Within(name, get, tol)` | 数值差在 ±tol 以内视为一致（如时间戳误差 1 秒） |
@@ -129,7 +129,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 | `Insert` | 做法 | 速度（e2e 5 万行） | 注意 |
 |---|---|---|---|
 | `InsertBatchLocked`（推荐） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.0s | 一次就写对 |
-| `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.0s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正（需 `Different = Fix`）。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
+| `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.0s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正。因此 `Missing = Fix` 时必须 `Different = Fix`，否则 `Run` 直接报参数错误。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
 | `InsertPerRow` | 每个 key 一个事务 | 64s | 最慢，用于排查 |
 
 ## 5. 对线上代码的要求与推荐上线流程
@@ -185,6 +185,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 
 ```sh
 go test -race ./...      # 单测：engine_test / compare_test / memtable / mysqltable（不需要数据库）
+cd e2e && go test ./...  # mysqltable 集成测试：连真实 MySQL，连不上自动跳过
 cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% 的 SQL 调用注入失败，验证重试。详见 e2e/README.md
 ```
 

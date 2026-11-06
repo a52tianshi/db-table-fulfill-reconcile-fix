@@ -15,7 +15,7 @@ func testSchema() Schema[order, key] {
 	return Schema[order, key]{
 		Columns:   []string{"order_id", "user_id"},
 		KeyColumn: "order_id",
-		Key:       func(o order) key { return key{o.ID, o.UserID} },
+		Key:       func(o order) key { return key(o) },
 		KeyValue:  func(k key) any { return k.ID },
 		Values:    func(o order) []any { return []any{o.ID, o.UserID} },
 		Scan: func(scan func(...any) error) (order, error) {

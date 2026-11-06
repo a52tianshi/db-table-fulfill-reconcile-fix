@@ -21,6 +21,9 @@ func (l LogNotifier[T, K]) Notify(_ context.Context, f Finding[T, K]) error {
 	if f.Fixed && !l.Fixed {
 		return nil
 	}
+	if l.W == nil {
+		return fmt.Errorf("LogNotifier: W is nil")
+	}
 	action := "WARN"
 	if f.Fixed {
 		action = "FIXED"

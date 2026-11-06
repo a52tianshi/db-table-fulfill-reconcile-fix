@@ -329,6 +329,7 @@ func (f flakyTx) InTx(ctx context.Context, fn func(r.Tx[row, int]) error) error 
 	return f.Store.InTx(ctx, fn)
 }
 
+//lint:ignore ST1005 mimics the MySQL driver message format
 var errFlaky = errors.New("Error 1213: deadlock")
 
 func retry(attempts int) r.Retry {
@@ -365,7 +366,7 @@ func TestRetriesExhaustedStopsRun(t *testing.T) {
 func TestNonRetryableErrorStopsImmediately(t *testing.T) {
 	s := fixture()
 	var scan, look int
-	boom := errors.New("Error 1146: table doesn't exist")
+	boom := errors.New("Error 1146: table does not exist")
 	cfg := config(s)
 	cfg.Old = flaky{s.Old(), boom, 100, &scan, &look}
 	cfg.Retry = retry(5)
@@ -469,6 +470,7 @@ func TestInvalidConfigTouchesNoData(t *testing.T) {
 		"size without limit":    func(c *r.Config[row, int]) { c.RowSize = func(row) int64 { return 1 } },
 		"zero attempts":         func(c *r.Config[row, int]) { c.Retry.MaxAttempts = 0 },
 		"max backoff too small": func(c *r.Config[row, int]) { c.Retry.MaxBackoff = 0 },
+		"snapshot + warn diff":  func(c *r.Config[row, int]) { c.Insert, c.Policy.Different = r.InsertBatchSnapshot, r.Warn },
 	}
 	for name, mutate := range cases {
 		cfg := config(s)
@@ -477,5 +479,20 @@ func TestInvalidConfigTouchesNoData(t *testing.T) {
 		if _, err := r.Run(context.Background(), cfg); err == nil || s.Tx != 0 {
 			t.Errorf("%s: err=%v tx=%d", name, err, s.Tx)
 		}
+	}
+}
+
+func TestLogNotifierNilWriter(t *testing.T) {
+	cfg := config(fixture())
+	cfg.Notifier = r.LogNotifier[row, int]{}
+	if _, err := r.Run(context.Background(), cfg); err == nil {
+		t.Fatal("nil writer must surface as an error, not a panic")
+	}
+}
+
+func TestReportString(t *testing.T) {
+	rep := mustRun(t, config(fixture()))
+	if rep.Consistent() || !strings.Contains(rep.String(), "missing=1 different=1 extra=1") {
+		t.Fatal(rep.String())
 	}
 }

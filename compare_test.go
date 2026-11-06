@@ -3,6 +3,7 @@ package reconcile_test
 import (
 	"slices"
 	"testing"
+	"time"
 
 	r "github.com/a52tianshi/db-table-fulfill-reconcile-fix"
 )
@@ -63,5 +64,34 @@ func TestStructRejectsTypos(t *testing.T) {
 	}
 	if _, err := r.Struct[int](nil); err == nil {
 		t.Fatal("non-struct must fail")
+	}
+}
+
+// Values read back from a database often differ only in representation.
+func TestStructComparesValuesNotRepresentation(t *testing.T) {
+	type rec struct {
+		At   time.Time
+		Blob []byte
+	}
+	c, err := r.Struct[rec](nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now() // carries a monotonic reading
+	same := []struct{ a, b rec }{
+		{rec{At: now}, rec{At: now.Round(0)}},                         // monotonic stripped
+		{rec{At: now.UTC()}, rec{At: now.In(time.FixedZone("X", 0))}}, // other *Location
+		{rec{Blob: nil}, rec{Blob: []byte{}}},                         // NULL vs empty
+	}
+	for i, x := range same {
+		if d := c.Diff(x.a, x.b); d != nil {
+			t.Errorf("case %d: %v", i, d)
+		}
+	}
+	if d := c.Diff(rec{At: now}, rec{At: now.Add(time.Second)}); !slices.Equal(d, []string{"At"}) {
+		t.Fatal(d)
+	}
+	if d := c.Diff(rec{Blob: []byte("a")}, rec{Blob: []byte("b")}); !slices.Equal(d, []string{"Blob"}) {
+		t.Fatal(d)
 	}
 }

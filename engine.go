@@ -301,7 +301,7 @@ func (r *run[T, K]) checkKeys(keys []K, maps ...map[K]T) error {
 	for _, m := range maps {
 		for k, v := range m {
 			if _, ok := want[k]; !ok || r.cfg.Key(v) != k {
-				return fmt.Errorf("Lock returned unrequested key %v (immutable key fields changed?)", k)
+				return fmt.Errorf("lock returned unrequested key %v (immutable key fields changed?)", k)
 			}
 		}
 	}

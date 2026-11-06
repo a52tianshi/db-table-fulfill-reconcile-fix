@@ -65,6 +65,10 @@ func (c *Config[T, K]) validate() error {
 	check(c.Policy.Missing == Warn || c.Policy.Missing == Fix, "Policy.Missing must be Warn or Fix, got %v", c.Policy.Missing)
 	check(c.Policy.Different == Warn || c.Policy.Different == Fix, "Policy.Different must be Warn or Fix, got %v", c.Policy.Different)
 	check(c.Insert >= InsertBatchLocked && c.Insert <= InsertBatchSnapshot, "Insert must be InsertBatchLocked, InsertPerRow or InsertBatchSnapshot, got %v", c.Insert)
+	// A stale snapshot insert is only corrected later as Different; with
+	// Different=Warn it would stay stale forever.
+	check(!(c.Insert == InsertBatchSnapshot && c.Policy.Missing == Fix && c.Policy.Different != Fix),
+		"InsertBatchSnapshot with Policy.Missing=Fix requires Policy.Different=Fix (stale snapshot rows are fixed as Different)")
 	check(c.ExtraCheck == CheckExtra || c.ExtraCheck == SkipExtra, "ExtraCheck must be CheckExtra or SkipExtra")
 	check(c.ScanPageSize > 0, "ScanPageSize must be > 0, got %d", c.ScanPageSize)
 	check(c.BatchSize > 0, "BatchSize must be > 0, got %d", c.BatchSize)
