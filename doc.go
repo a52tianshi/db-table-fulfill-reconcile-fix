@@ -7,12 +7,18 @@
 // again from the fresh state, and only then warned or fixed per Policy.
 // Rows only present in new are warned, never deleted.
 //
-// You provide (or take from package mysqltable):
+// The single entry point is Run(ctx, Config). Every Config field is
+// required; Run validates all of them before touching any data. You provide
+// (or take from package mysqltable):
 //
-//	Source     old/new Scan + batch Lookup (sharding lives here)
+//	Source     old/new ScanPage + batch Lookup (sharding lives here)
 //	Repairer   transactions: Lock-reread, Insert (batch), Update (single row)
 //	Comparator which fields must match, which may differ (Exact, Fields, Struct)
 //	Policy     Warn or Fix per Missing / Different
+//	Retry      per-step retry of every scan page, lookup, transaction, notify
+//	Progress   callback after every committed batch (or NoProgress)
 //
-// Package memtable is an in-memory implementation for tests and examples.
+// Source and Repairer implementations make one attempt per call; the engine
+// owns retries. Package memtable is an in-memory implementation for tests
+// and examples.
 package reconcile

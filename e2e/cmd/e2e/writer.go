@@ -31,7 +31,7 @@ func (p *idPool) pick(rng *rand.Rand) (store.Key, bool) {
 }
 
 // The simulated online code. Every write touches old and new in ONE
-// transaction, old row first (same lock order as the Reviewer). An UPDATE on a
+// transaction, old row first (same lock order as the library Repairer). An UPDATE on a
 // not-yet-migrated row affects 0 rows in the new table; the framework fills it.
 func dualInsert(ctx context.Context, db *sql.DB, o store.Order) error {
 	tx, err := db.BeginTx(ctx, store.TxOpts())

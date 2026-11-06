@@ -32,7 +32,7 @@ flowchart LR
 
 入口只有一个：`reconcile.Run(ctx, cfg)`。**所有参数都必须填写，没有默认值。** `Run` 在访问任何数据之前先检查整个配置，有问题会一次列出全部，然后直接返回错误。`mysqltable.NewPair(cfg)` 也按同样的规则检查。
 
-完整可编译的示例见 [`mysqltable/example_test.go`](mysqltable/example_test.go)。共四步：
+完整可编译的示例见 [`mysqltable/example_test.go`](mysqltable/example_test.go)。接入共四步（①–④）；⑤ ⑥ 是 Config 里 `Retry`、`Progress` 两项的详细说明。
 
 ### ① Schema：列和结构体的映射
 
@@ -77,7 +77,7 @@ flowchart LR
 | `Insert` | `InsertBatchLocked` / `InsertBatchSnapshot` / `InsertPerRow` | 缺失行的插入方式，见第 4 节。只告警时也必须填 |
 | `ExtraCheck` | `CheckExtra` / `SkipExtra` | 是否反向扫描新表，找出只在新表存在的行 |
 | `Repairer` | `pair.Repairer()` | |
-| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 每条确认的差异都会在事务提交后回调（包括已修复的） |
+| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 每条确认的差异都会在事务提交后回调（包括已修复的）。回调失败会按 `Retry` 重试，所以同一条可能收到多次，请按 key 去重 |
 | `Progress` | `r.LogProgress(os.Stderr, 10*time.Second)` / `r.NoProgress` / 自己的函数 | 进度回调，见 ⑥ |
 | `ScanPageSize` | 1000 | 每条扫描 SQL 读多少行 |
 | `BatchSize` | 1000 | 攒多少行做一次另一侧的批量查询 |
@@ -98,7 +98,8 @@ flowchart LR
 | `Retryable` | `mysqltable.IsTransient` | 哪些错误值得重试。`IsTransient` 覆盖死锁、锁等待超时、连接断开等；也可以传 `func(error) bool { return true }`，表示全部重试 |
 
 - 某一步超过 `MaxAttempts` 仍然失败，`Run` 立即返回 `scan old page 3: giving up after 5 attempts: <最后一次的错误>`。已提交的事务不回滚，修好问题后重跑即可（幂等）。
-- context 取消、`ErrConflict`、引擎自身的不变量错误（例如重复 key）不会重试。
+- context 取消、引擎自身的不变量错误（例如同一批里出现重复 key）不会重试，直接退出。
+- `ErrConflict`（插入时主键冲突）也不按 `Retry` 重试，而是对这些 key 重新加锁复核，最多 3 次。
 - 事务整体重跑：事务内是先加锁重读、再写入，所以即使上次提交结果未知，重跑也是安全的。
 - `Report.Retries` 记录了总共重试的次数。
 
@@ -152,11 +153,13 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 
 `Policy.Missing = Fix` 时，插入方式有三种：
 
-| `Insert` | 做法 | 速度（e2e 5 万行） | 注意 |
+| `Insert` | 做法 | 第一轮补 5 万行耗时 | 注意 |
 |---|---|---|---|
-| `InsertBatchLocked`（推荐） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.0s | 一次就写对 |
-| `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.0s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正。因此 `Missing = Fix` 时必须 `Different = Fix`，否则 `Run` 直接报参数错误。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
-| `InsertPerRow` | 每个 key 一个事务 | 64s | 最慢，用于排查 |
+| `InsertBatchLocked`（推荐） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.2s | 一次就写对 |
+| `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.1s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正。因此 `Missing = Fix` 时必须 `Different = Fix`，否则 `Run` 直接报参数错误。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
+| `InsertPerRow` | 每个 key 一个事务 | 53s | 最慢，用于排查 |
+
+耗时是 e2e 默认参数的实测值：页、批都是 1000，事务 200 个 key，8 个写入线程持续双写，不注入故障；本机 Apple M5，MySQL 9.7.1。各模式、各参数组合的完整结果见 [e2e/README.md](e2e/README.md#参考结果)。
 
 ## 5. 对线上代码的要求与推荐上线流程
 
@@ -176,7 +179,13 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 | `Missing` / `Different` / `Extra` | 重读后确认的差异数 |
 | `Inserted` / `Updated` / `Warned` | 实际插入、覆盖、仅告警的行数 |
 | `Retries` | 所有步骤累计重试的次数 |
+| `Duration` | 本轮耗时 |
 | `Consistent()` | 本轮没有确认任何差异 |
+
+两个口径说明：
+
+- `InsertBatchSnapshot` 插入的行没有经过重读，它的 `Missing` 是按扫描结果计的。
+- 如果事务提交时连接断开、实际却已提交，重跑时这批行会被计为 `Stale`，不计入 `Inserted`。数据是正确的，只是数字偏小。
 
 ## 7. 不用 MySQL：自己实现接口
 
@@ -186,9 +195,9 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 |---|---|---|
 | `Source[T,K]` | `ScanPage(ctx, cursor, limit)` | 返回 cursor 之后的至多 limit 行，以及下一页的 cursor（nil 表示扫完）。用同一个 cursor 重复调用必须得到同一页的位置；整个扫描中每个 key 恰好出现一次 |
 | | `Lookup(ctx, keys)` | 返回存在的行；map 里没有的 key 就表示确认不存在；部分失败必须返回 error |
-| `Repairer[T,K]` | `InTx(ctx, fn)` | fn 返回 nil 才提交；可以重试 fn |
+| `Repairer[T,K]` | `InTx(ctx, fn)` | fn 返回 nil 才提交，任何错误都回滚；只尝试一次，由引擎决定是否重跑整个 `InTx` |
 | `Tx[T,K]` | `Lock(ctx, keys)` | 加锁重读两边，先老后新 |
-| | `Insert(ctx, rows)` | 多行插入新表，主键冲突返回 `ErrConflict` |
+| | `Insert(ctx, rows)` | 多行插入新表；主键冲突时返回包装了 `ErrConflict` 的错误 |
 | | `Update(ctx, row)` | 用老表行覆盖新表的同 key 行 |
 | `Grouper[K]`（可选） | `Group(K) string` | 同一事务内的 key 属于同一组（如同一分表） |
 
@@ -197,7 +206,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 - 引擎串行执行，没有后台 goroutine。一批处理完才读下一批，形成天然背压。
 - 每一步失败先按 `Retry` 重试；重试次数用完，或遇到不可重试的错误，`Run` 立即停止。已提交的事务不回滚，重跑是幂等的。
 - 扫描失败时，不会处理未满的尾批。
-- 每张表扫描开始时会记下当前最大主键作为扫描上限，之后新插入的行留给双写保证。持续写入下，单轮不保证全局一致，需要多轮收敛（见第 5 节）。
+- mysqltable 在每张表扫描开始时，记下当前最大主键作为扫描上限，之后新插入的行留给双写保证。持续写入下，单轮不保证全局一致，需要多轮收敛（见第 5 节）。
 
 ## 9. 目录结构与测试
 
@@ -218,5 +227,5 @@ cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% �
 ## 设计文档
 
 - [guide.html](guide.html)、[批量扫描演示](batch-scan-demo.html)、[单线程状态流转图](single-thread-state-flow.html)：离线交互演示（[维护说明](docs/visuals/README.md)）。
-- [状态机设计稿](docs/state-machine.md)：多表调度、进度上报、检查点等后续设计，尚未实现。
+- [状态机设计稿](docs/state-machine.md)：多表调度、逐 key 状态、检查点等后续设计，尚未实现。进度上报已经有了一个简化版，即 ⑥ 的进度回调。
 - [接口约定](docs/interface-contracts.md)：各接口的正确性约定细节。

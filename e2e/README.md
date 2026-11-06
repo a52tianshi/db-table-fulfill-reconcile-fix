@@ -2,7 +2,7 @@
 
 独立 Go module（通过 `replace ../` 引用本库），MySQL 驱动只在这里引入，根模块仍零依赖。
 
-被测对象就是库本身：`cmd/e2e/reconcile.go` 用 `mysqltable.NewPair` + `reconcile.New` 接入，`internal/store` 只有表结构、`Schema` 映射、分表规则、雪花 ID 和数据分布。writer（模拟线上双写）与 verify（独立逐行比对）不依赖库。
+被测对象就是库本身：`cmd/e2e/reconcile.go` 用 `mysqltable.NewPair` + `reconcile.Run` 接入，`internal/store` 只有表结构、`Schema` 映射、分表规则、雪花 ID 和数据分布。writer（模拟线上双写）与 verify（独立逐行比对）不依赖库。
 
 ## 两类测试
 
@@ -34,11 +34,11 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 
 | 值 | 做法 | 第二轮断言 |
 |---|---|---|
-| `batch-snapshot`（默认） | 每个分片一条多行 INSERT，直接用扫描时的值。最快；扫描后被更新的行会以旧值写入 | 无缺失/额外；允许覆盖若干"不同"（就是这些旧值） |
-| `batch-locked` | 每个分片一个事务，`FOR UPDATE` 重读老表后多行 INSERT | 0 修复 |
+| `batch-snapshot`（默认） | 按分片、每 `TX_BATCH` 个 key 一个事务，直接用扫描时的值多行 INSERT。最快；扫描后被更新的行会以旧值写入 | 无缺失/额外；允许覆盖若干"不同"（就是这些旧值） |
+| `batch-locked` | 按分片、每 `TX_BATCH` 个 key 一个事务，`FOR UPDATE` 重读老表后多行 INSERT | 0 修复 |
 | `per-row` | 逐条事务复核插入 | 0 修复 |
 
-"内容不同"和"仅新表存在"始终逐条复核。三种方式都要求第三轮在写入仍进行时 0 修复。
+"内容不同"和"仅新表存在"不受插入方式影响：总是按分片批量加锁复核，确认"不同"后逐条 UPDATE。三种方式都要求第三轮在写入仍进行时 0 修复。
 
 批量快照插入能靠下一轮收敛，前提是：老表**没有删除**（否则被删的行会以旧值插入新表，之后只会报警为额外行、永不删除），且下一轮的"不同"走加锁重读的逐条修复。
 
@@ -54,9 +54,9 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 | 5 停止所有写入 | `kill -TERM writer` | writer 正常退出 |
 | 6 在同一一致性快照内逐行比对 | `e2e verify` | 新表每行都在正确分片、老表每行在新表存在且全列相等、总数相等 |
 
-第 4 步的 `candidates` 可以大于 0：扫描老表与查新表之间若被双写更新，初比会疑似不同，事务内重读后相等，计为 `staleSkipped`。这是预期行为，不算失败。
+第 4 步的 `suspected` 可以大于 0：扫描老表和查新表之间，这一行如果被双写更新了，第一次比对会疑似不同，事务内重读后又相等，计入 `stale`。这是预期行为，不算失败。
 
-双写语义：模拟线上代码，`UPDATE` 新表时若该行尚未迁移则影响 0 行，交由框架补齐。写入方与 Reviewer 都按 老表 → 新表 的顺序加行锁，使用 READ COMMITTED，死锁/锁等待超时会重试。
+双写语义：模拟线上代码，`UPDATE` 新表时若该行尚未迁移则影响 0 行，交由框架补齐。写入方与库的 Repairer 都按 老表 → 新表 的顺序加行锁，使用 READ COMMITTED，死锁/锁等待超时会重试。
 
 ## 运行
 
@@ -75,6 +75,32 @@ bin/e2e reconcile -fail-rate 1 -retry-attempts 3     # 每次调用都失败: �
 bin/e2e reconcile -progress-every 500ms              # 进度日志间隔（0 = 不输出进度）
 ```
 
-`run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始和提交前，按 2% 概率注入一个伪造的死锁错误（`internal/store/chaos.go`），验证每一步都会被重试。报告中的 `injected` 应当等于 `retries`。设为 `FAIL_RATE=0` 可以关闭注入。
+`run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始和提交前，按 2% 概率注入一个伪造的死锁错误（`internal/store/chaos.go`），验证每一步都会被重试。报告中 `retries` = `injected` + MySQL 真实发生的可重试错误（死锁等，实测一直是 0），所以两者应当相等。设为 `FAIL_RATE=0` 可以关闭注入。
 
 `init` 会 **DROP 并重建** DSN 指定库中的上述 101 张表。writer 日志在 `logs/writer.log`。
+
+## 参考结果
+
+本机 Apple M5，MySQL 9.7.1，默认参数（`ROWS=50000`、`DIST=skew`、8 个写入线程、页/批 1000、事务 200 个 key），`GAP=3`。每组都是一次完整的 `./run.sh`，全部 `E2E PASS`。
+
+| `INSERT_MODE` | `FAIL_RATE` | 第一轮 | 第二轮覆盖旧值 | 第三轮修复 | 重试 = 注入 |
+|---|---|---|---|---|---|
+| `batch-snapshot` | 0 | 5.1s | 151 行 | 0 | — |
+| `batch-snapshot` | 0.02 | 6.2s | 137 行 | 0 | 178+22+11，全部相等 |
+| `batch-locked` | 0 | 7.2s | 0 | 0 | — |
+| `batch-locked` | 0.02 | 8.5s | 0 | 0 | 182+7+10，全部相等 |
+| `per-row` | 0 | 53s | 0 | 0 | — |
+| `per-row` | 0.02 | 112s | 0 | 0 | 1997+18+22，全部相等 |
+
+其他组合（同样全部通过）：
+
+| 参数 | 第一轮 | 说明 |
+|---|---|---|
+| `INSERT_MODE=batch-locked PAGE=97 BATCH=250 TX_BATCH=17 MEMORY_LIMIT=8000 FAIL_RATE=0.05` | 45s | 页、批、事务大小互不整除，内存上限生效，重试 2498 = 注入 2498 |
+| `DIST=uniform FAIL_RATE=0.05` | 12s | 100 张分表均匀分布，第二轮覆盖 227 行旧值 |
+
+几点解读：
+
+- 第二轮覆盖的行数，取决于扫描和插入之间有多少行恰好被线上改动，每次运行都不一样。只有 `batch-snapshot` 会出现，另两种一次就写对。
+- 注入故障的成本主要是重试前的等待（`-retry-backoff` 默认 5ms，按次翻倍）。`per-row` 第一轮有 5 万多个事务，注入次数最多，所以变慢最明显。
+- 页、批设得很小时明显变慢（45s 对比约 7s），因为 SQL 条数多了。生产环境建议保持在 1000 左右。
