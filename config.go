@@ -33,7 +33,9 @@ type Config[T any, K comparable] struct {
 	TxBatchSize  int // max keys per recheck / insert transaction, > 0
 	// MemoryLimit flushes the batch early once buffered rows reach this many
 	// bytes (as estimated by RowSize). NoMemoryLimit disables it; then
-	// RowSize must be nil. Peak rows held = BatchSize + ScanPageSize.
+	// RowSize must be nil. The scan page and batch are separately bounded by
+	// ScanPageSize and BatchSize; lookup/transaction results add memory.
+	// This is not a process RSS cap; a single oversized row is still processed.
 	MemoryLimit int64
 	RowSize     func(T) int64
 

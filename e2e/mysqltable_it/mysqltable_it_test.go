@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,9 +241,13 @@ func TestLockHoldsRowLocks(t *testing.T) {
 	db := openDB(t)
 	insert(t, db, "it_old", order(1, 0))
 	p := newPair(t, db)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	locked := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLocks := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseLocks()
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Repairer().InTx(ctx, func(tx r.Tx[store.Order, store.Key]) error {
@@ -250,24 +255,41 @@ func TestLockHoldsRowLocks(t *testing.T) {
 				return err
 			}
 			close(locked)
-			<-release
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			return nil
 		})
 	}()
-	<-locked
+	select {
+	case <-locked:
+	case err := <-done:
+		t.Fatalf("lock failed before ready: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = conn.ExecContext(ctx, "SET SESSION innodb_lock_wait_timeout = 1")
+	if _, err := conn.ExecContext(ctx, "SET SESSION innodb_lock_wait_timeout = 1"); err != nil {
+		t.Fatal(err)
+	}
 	_, err = conn.ExecContext(ctx, "UPDATE it_old SET remark='x' WHERE order_id=?", base+1)
-	close(release)
+	releaseLocks()
 	if !mysqltable.IsTransient(err) {
 		t.Fatalf("expected lock wait timeout while locked, got %v", err)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 

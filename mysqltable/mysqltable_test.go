@@ -17,6 +17,7 @@ func testSchema() Schema[order, key] {
 		KeyColumn: "order_id",
 		Key:       func(o order) key { return key(o) },
 		KeyValue:  func(k key) any { return k.ID },
+		KeyLess:   func(a, b key) bool { return a.ID < b.ID },
 		Values:    func(o order) []any { return []any{o.ID, o.UserID} },
 		Scan: func(scan func(...any) error) (order, error) {
 			var o order
@@ -84,12 +85,13 @@ func TestNewPairValidates(t *testing.T) {
 		t.Fatal("empty config must fail")
 	}
 	cases := map[string]func(*PairConfig[order, key]){
-		"key column":  func(c *PairConfig[order, key]) { c.Schema.KeyColumn = "id" },
-		"bad table":   func(c *PairConfig[order, key]) { c.Old = Single[key]("bad`name") },
-		"no tx opts":  func(c *PairConfig[order, key]) { c.TxOptions = nil },
-		"zero chunk":  func(c *PairConfig[order, key]) { c.InChunk = 0 },
-		"no dup func": func(c *PairConfig[order, key]) { c.IsDuplicate = nil },
-		"no scan":     func(c *PairConfig[order, key]) { c.Schema.Scan = nil },
+		"key column":   func(c *PairConfig[order, key]) { c.Schema.KeyColumn = "id" },
+		"bad table":    func(c *PairConfig[order, key]) { c.Old = Single[key]("bad`name") },
+		"no tx opts":   func(c *PairConfig[order, key]) { c.TxOptions = nil },
+		"zero chunk":   func(c *PairConfig[order, key]) { c.InChunk = 0 },
+		"no dup func":  func(c *PairConfig[order, key]) { c.IsDuplicate = nil },
+		"no scan":      func(c *PairConfig[order, key]) { c.Schema.Scan = nil },
+		"no key order": func(c *PairConfig[order, key]) { c.Schema.KeyLess = nil },
 	}
 	for name, mutate := range cases {
 		c := pairConfig()

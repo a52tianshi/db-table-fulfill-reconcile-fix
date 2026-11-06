@@ -154,7 +154,10 @@ type Finding[T any, K comparable] struct {
 }
 
 // Notifier receives every confirmed Finding (warned and fixed). It is
-// retried like any other step; exhausting retries stops the Run.
+// called serially after the WHOLE committed batch is counted. It is retried
+// like any other step; exhausting retries stops the Run and leaves later
+// findings undelivered. Notifications may be duplicated or lost; there is no
+// durable queue/outbox or replay guarantee on a later Run.
 type Notifier[T any, K comparable] interface {
 	Notify(ctx context.Context, f Finding[T, K]) error
 }

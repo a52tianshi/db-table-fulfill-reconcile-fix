@@ -19,7 +19,7 @@ type Report struct {
 
 	Inserted int64 // rows written into New by Insert
 	Updated  int64 // rows overwritten in New by Update
-	Warned   int64 // findings notified without writing
+	Warned   int64 // confirmed findings assigned warn-only; NOT a delivery count
 
 	Retries int64 // failed attempts that were retried (any step)
 

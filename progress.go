@@ -26,8 +26,10 @@ func (p Phase) String() string {
 }
 
 // Progress is a snapshot delivered to Config.Progress. All counts in Report
-// are committed results: the batch has been looked up, rechecked and its
-// writes committed before the callback runs.
+// describing findings reflect whole committed transactions, even if a later
+// notification fails. Scanned/suspected/retry fields are execution counters,
+// not commit counters. A regular batch callback runs only after the batch
+// and notifications finish; Done also reports partial progress on failure.
 type Progress struct {
 	Phase     Phase
 	Batch     int  // batches completed in this phase

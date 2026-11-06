@@ -22,6 +22,11 @@ type Schema[T any, K comparable] struct {
 	// (int64, string...), never a []byte.
 	Key      func(T) K
 	KeyValue func(K) any
+	// KeyLess orders keys by KeyColumn using the same order as MySQL and
+	// online writers. Required: it is used BEFORE locking IN queries are
+	// chunked. For an int64 primary key, return a.ID < b.ID. For strings,
+	// account for the column collation; do not sort numeric keys as strings.
+	KeyLess func(a, b K) bool
 	// Values returns column values in Columns order (for INSERT / UPDATE).
 	Values func(T) []any
 	// Scan reads one row whose columns are in Columns order, e.g.
@@ -38,7 +43,8 @@ type PairConfig[T any, K comparable] struct {
 	New    Router[K]    // sharding rule of the new side, e.g. Mod
 
 	// TxOptions for repair transactions; READ COMMITTED is recommended
-	// (locking reads see the latest commit, no gap locks).
+	// (locking reads see the latest commit; gap locks may still be used
+	// for duplicate-key and foreign-key checks).
 	TxOptions *sql.TxOptions
 	InChunk   int // max keys per `IN (...)` query, > 0 (e.g. 1000)
 	// InsertChunk is max rows per multi-row INSERT statement, > 0 (e.g. 500).
@@ -65,6 +71,7 @@ func (c *PairConfig[T, K]) validate() error {
 	check(len(s.Columns) > 0, "Schema.Columns is required")
 	check(s.Key != nil, "Schema.Key is required")
 	check(s.KeyValue != nil, "Schema.KeyValue is required")
+	check(s.KeyLess != nil, "Schema.KeyLess is required")
 	check(s.Values != nil, "Schema.Values is required")
 	check(s.Scan != nil, "Schema.Scan is required")
 	hasKey := false
@@ -119,7 +126,7 @@ func IsDuplicateKey(err error) bool { return err != nil && mysqlErrno(err, "1062
 // (2006, 2013), too many connections (1040), and broken connections.
 // Anything else (syntax, missing table, duplicate key...) is not retried.
 func IsTransient(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrMisrouted) {
 		return false
 	}
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {

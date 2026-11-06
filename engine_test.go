@@ -497,3 +497,77 @@ func TestReportString(t *testing.T) {
 		t.Fatal(rep.String())
 	}
 }
+
+func TestNotifyFailureCountsWholeCommittedBatch(t *testing.T) {
+	for _, kind := range []string{"missing-locked", "missing-snapshot", "different", "warn-only"} {
+		t.Run(kind, func(t *testing.T) {
+			old := []row{{1, "fresh", ""}, {2, "fresh", ""}, {3, "fresh", ""}}
+			var current []row
+			if kind == "different" {
+				current = []row{{1, "stale", ""}, {2, "stale", ""}, {3, "stale", ""}}
+			}
+			s := memtable.New(key, old, current)
+			cfg := config(s)
+			cfg.Policy, cfg.ExtraCheck = fix, r.SkipExtra
+			cfg.ScanPageSize, cfg.BatchSize, cfg.TxBatchSize = 3, 3, 3
+			if kind == "missing-snapshot" {
+				cfg.Insert = r.InsertBatchSnapshot
+			}
+			if kind == "warn-only" {
+				cfg.Policy = r.Policy{Missing: r.Warn, Different: r.Warn}
+			}
+			sentinel := errors.New("permanent notification failure")
+			calls := 0
+			cfg.Notifier = r.NotifyFunc[row, int](func(context.Context, r.Finding[row, int]) error { calls++; return sentinel })
+			var final r.Progress
+			cfg.Progress = func(p r.Progress) { final = p }
+			rep, err := r.Run(context.Background(), cfg)
+			if !errors.Is(err, sentinel) || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+			if kind == "different" {
+				if rep.Different != 3 || rep.Updated != 3 || final.Report.Updated != 3 {
+					t.Fatalf("committed all updates but report=%+v final=%+v", rep, final.Report)
+				}
+			} else if rep.Missing != 3 {
+				t.Fatalf("confirmed entire batch but report=%+v", rep)
+			}
+			if kind == "warn-only" {
+				if rep.Warned != 3 || rep.Inserted != 0 || len(s.Rows(false)) != 0 {
+					t.Fatalf("%+v", rep)
+				}
+			} else {
+				if len(s.Rows(false)) != 3 {
+					t.Fatal("expected all rows committed")
+				}
+				if kind != "different" && (rep.Inserted != 3 || final.Report.Inserted != 3) {
+					t.Fatalf("committed all inserts but report=%+v final=%+v", rep, final.Report)
+				}
+			}
+		})
+	}
+}
+
+func TestNotifyFailureCountsAllConfirmedExtras(t *testing.T) {
+	rows := []row{{1, "extra", ""}, {2, "extra", ""}, {3, "extra", ""}}
+	s := memtable.New(key, nil, rows)
+	cfg := config(s)
+	cfg.ScanPageSize, cfg.BatchSize, cfg.TxBatchSize = 3, 3, 3
+	sentinel := errors.New("notify failed")
+	cfg.Notifier = r.NotifyFunc[row, int](func(context.Context, r.Finding[row, int]) error { return sentinel })
+	rep, err := r.Run(context.Background(), cfg)
+	if !errors.Is(err, sentinel) || rep.Extra != 3 || rep.Warned != 3 || len(s.Rows(false)) != 3 || rep.Inserted+rep.Updated != 0 {
+		t.Fatalf("%v err=%v rows=%v", rep, err, s.Rows(false))
+	}
+}
+func TestNotifyFailureDoesNotCountUncommittedChunks(t *testing.T) {
+	s := memtable.New(key, []row{{1, "fresh", ""}, {2, "fresh", ""}, {3, "fresh", ""}}, nil)
+	cfg := config(s)
+	cfg.Policy, cfg.ExtraCheck = fix, r.SkipExtra
+	cfg.ScanPageSize, cfg.BatchSize, cfg.TxBatchSize = 3, 3, 2
+	cfg.Notifier = r.NotifyFunc[row, int](func(context.Context, r.Finding[row, int]) error { return errors.New("notify failed") })
+	rep, err := r.Run(context.Background(), cfg)
+	if err == nil || rep.Inserted != 2 || rep.Missing != 2 || len(s.Rows(false)) != 2 {
+		t.Fatalf("only first transaction committed: %v err=%v rows=%v", rep, err, s.Rows(false))
+	}
+}

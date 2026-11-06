@@ -158,6 +158,7 @@ func Schema() mysqltable.Schema[Order, Key] {
 		KeyColumn: "order_id",
 		Key:       KeyOf,
 		KeyValue:  func(k Key) any { return k.OrderID },
+		KeyLess:   func(a, b Key) bool { return a.OrderID < b.OrderID },
 		Values:    Order.Args,
 		Scan: func(scan func(...any) error) (Order, error) {
 			return ScanOrder(scanFunc(scan))

@@ -34,6 +34,7 @@ func Example() {
 		KeyColumn: "order_id",
 		Key:       func(o Order) OrderKey { return OrderKey{o.OrderID, o.UserID} },
 		KeyValue:  func(k OrderKey) any { return k.OrderID },
+		KeyLess:   func(a, b OrderKey) bool { return a.OrderID < b.OrderID },
 		Values: func(o Order) []any {
 			return []any{o.OrderID, o.UserID, o.Status, o.Amount, o.Remark, o.UpdatedAt}
 		},

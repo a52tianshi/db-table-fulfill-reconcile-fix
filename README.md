@@ -3,7 +3,7 @@
 老表 → 新表（可分表）在线迁移时使用的 **数据比对与补齐** Go 库。老表是权威数据源。库会扫描老表，按批查询新表做比对；发现疑似差异后，在事务内加锁重读两边，确认确实不一致，再按你的策略 **告警或修复**。只在新表存在的行只告警，永不删除。
 
 - 纯标准库，Go 1.22+；`mysqltable` 只依赖 `database/sql`，用哪个驱动由你决定。
-- 内存有界：按批处理，可同时限制行数（`BatchSize`）和字节数（`MemoryLimit`）。
+- 分页与批处理有界：`BatchSize` 限制当前批条数，`MemoryLimit` 是当前批的估算字节阈值，不是进程 RSS 上限。
 - 支持数据倾斜：空表、不足一页的表、热点表都能正确处理（e2e 有专门覆盖）。
 
 ```sh
@@ -26,11 +26,13 @@ flowchart LR
     A -->|老表扫完| H[反向扫描新表 → 查老表<br/>仅新表有: 只告警]
 ```
 
-疑似差异一律重读后再处理，所以线上并发写入不会让引擎写入过期数据。缺失行可以批量插入；内容不同的行逐条 UPDATE。
+除显式选择的 `InsertBatchSnapshot` 外，疑似差异均在事务内加锁重读后再处理；快照插入可能写入扫描时的旧值，必须按后文约定重跑。缺失行可以批量插入；内容不同的行逐条 UPDATE。
 
 ## 2. 接入 MySQL：需要填写什么
 
 入口只有一个：`reconcile.Run(ctx, cfg)`。**所有参数都必须填写，没有默认值。** `Run` 在访问任何数据之前先检查整个配置，有问题会一次列出全部，然后直接返回错误。`mysqltable.NewPair(cfg)` 也按同样的规则检查。
+
+**接入变更：`Schema.KeyLess` 现为必填。** 已有调用方需增加按数据库主键顺序比较 key 的函数；缺少它时 `NewPair` 在任何 I/O 前返回配置错误。
 
 完整可编译的示例见 [`mysqltable/example_test.go`](mysqltable/example_test.go)。接入共四步（①–④）；⑤ ⑥ 是 Config 里 `Retry`、`Progress` 两项的详细说明。
 
@@ -42,6 +44,7 @@ flowchart LR
 | `KeyColumn` | 单列主键（如 `order_id`），用于 keyset 分页、`IN` 查询、`UPDATE … WHERE` |
 | `Key func(T) K` | 行的唯一标识。如果分表依赖其他字段，把它们也放进 K，如 `{OrderID, UserID}`。这些字段必须不可变 |
 | `KeyValue func(K) any` | 由 K 取出 `KeyColumn` 的值，必须带类型（int64、string 等），不能是 `[]byte` |
+| `KeyLess func(a,b K) bool` | 必填。按 `KeyColumn` 的数据库主键顺序排序，在切分锁定 `IN` 查询之前使用。例如 `a.OrderID < b.OrderID`；不能把整数转成字符串排序。字符串主键须考虑列 collation，并与线上写入方保持同一顺序 |
 | `Values func(T) []any` | 按 `Columns` 顺序返回列值（INSERT / UPDATE 使用） |
 | `Scan func(scan) (T, error)` | 按 `Columns` 顺序把一行读进 T |
 
@@ -61,7 +64,7 @@ flowchart LR
 | `DB` | `*sql.DB` | 老表和所有新表都在这一个 MySQL 实例上 |
 | `Schema` | 见 ① | |
 | `Old` / `New` | 见 ② | |
-| `TxOptions` | `&sql.TxOptions{Isolation: sql.LevelReadCommitted}` | 修复事务的隔离级别，推荐 READ COMMITTED（锁定读能读到最新版本，且不加间隙锁） |
+| `TxOptions` | `&sql.TxOptions{Isolation: sql.LevelReadCommitted}` | 修复事务的隔离级别，推荐 READ COMMITTED（锁定读能读到最新版本；普通搜索不加间隙锁，但外键和重复键检查存在例外） |
 | `InChunk` | 1000 | 一条 `IN (...)` 查询最多带多少个 key |
 | `InsertChunk` | 500 | 一条多行 INSERT 最多插多少行 |
 | `IsDuplicate` | `mysqltable.IsDuplicateKey` | 判断主键冲突（MySQL 错误码 1062） |
@@ -77,12 +80,12 @@ flowchart LR
 | `Insert` | `InsertBatchLocked` / `InsertBatchSnapshot` / `InsertPerRow` | 缺失行的插入方式，见第 4 节。只告警时也必须填 |
 | `ExtraCheck` | `CheckExtra` / `SkipExtra` | 是否反向扫描新表，找出只在新表存在的行 |
 | `Repairer` | `pair.Repairer()` | |
-| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 每条确认的差异都会在事务提交后回调（包括已修复的）。回调失败会按 `Retry` 重试，所以同一条可能收到多次，请按 key 去重 |
+| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 先计入整批已提交结果，再逐条回调（包括已修复的）。回调失败会按 `Retry` 重试并最终停止 Run；通知可能重复或遗漏，无可靠交付保证 |
 | `Progress` | `r.LogProgress(os.Stderr, 10*time.Second)` / `r.NoProgress` / 自己的函数 | 进度回调，见 ⑥ |
 | `ScanPageSize` | 1000 | 每条扫描 SQL 读多少行 |
 | `BatchSize` | 1000 | 攒多少行做一次另一侧的批量查询 |
 | `TxBatchSize` | 200 | 一个复核或插入事务最多处理多少个 key。mysqltable 还保证一个事务只涉及一张新分表 |
-| `MemoryLimit` | 字节数，或 `r.NoMemoryLimit` | 缓存的行达到这个大小就提前处理当前批。行数上限是 `BatchSize + ScanPageSize` |
+| `MemoryLimit` | 字节数，或 `r.NoMemoryLimit` | 当前批估算达到阈值就提前处理。扫描页最多 `ScanPageSize` 条，当前批最多 `BatchSize` 条；查询和事务结果另占内存 |
 | `RowSize` | `func(T) int64` | 估算每行字节数。`MemoryLimit > 0` 时必填，`NoMemoryLimit` 时必须为 nil |
 | `Retry` | 见下表 | 重试策略 |
 
@@ -107,7 +110,7 @@ flowchart LR
 
 `Progress func(reconcile.Progress)` 在以下时机被**同步**调用：
 
-- 每批处理完之后：这一批已经查询过另一侧，复核、插入或更新都已提交，所以数字都是已落库的结果。
+- 每批处理完之后：这一批已完成查询、事务处理及通知。差异/修复数来自已提交事务；扫描、候选和重试是执行计数。通知失败时，最终回调仍包含整批已提交结果。
 - 每个阶段结束时（`PhaseDone=true`）：正向扫描老表结束、反向扫描新表结束。
 - Run 结束时调最后一次（`Done=true`）；出错退出时同时带上 `Err`。参数检查失败时不会回调。
 
@@ -133,13 +136,13 @@ reconcile progress phase=old batch=15 pages=15 scanned old=15000 new=0 | missing
 | 写法 | 含义 |
 |---|---|
 | `r.Exact[T]()` | 整行 `==` 才算一致。注意：含 `time.Time` 字段时不要用（`==` 会比较时区指针和单调时钟） |
-| `r.Struct[T](ignore, custom...)` | **推荐**。比较所有导出字段，`ignore` 中的字段允许不同；`custom` 覆盖某个字段的比较方式。字段名拼错会直接报错，不会悄悄漏比。按值比较：`time.Time` 用 `Equal`（同一时刻即相等，不管时区和单调时钟），`[]byte` 中 nil 与空视为相等 |
+| `r.Struct[T](ignore, custom...)` | **推荐**。比较所有导出字段，`ignore` 中的字段允许不同；`custom` 覆盖某个字段的比较方式。仅支持顶层字段名，拼错或使用匿名嵌入类型的提升字段名会直接报错，不会静默接受。按值比较：`time.Time` 用 `Equal`（同一时刻即相等，不管时区和单调时钟），`[]byte` 中 nil 与空视为相等 |
 | `r.Fields(fields...)` | 只比较列出的字段，没列出的都允许不同 |
 | `r.Eq(name, get)` | 字段精确相等 |
-| `r.Within(name, get, tol)` | 数值差在 ±tol 以内视为一致（如时间戳误差 1 秒） |
+| `r.Within(name, get, tol)` | 无溢出地比较 int64 差值是否在 ±tol 内；负 tol 在构造时 panic（如时间戳误差 1 秒） |
 | `r.CompareFunc[T](func(old, new T) []string)` | 完全自定义：返回不一致的字段名，返回空表示一致 |
 
-被容忍的差异不算疑似差异：不会复核、不会修复、也不会告警。
+只有被容忍的差异时，不会复核、修复或告警。若其他字段触发修复，仍会按策略整行覆盖，包含忽略字段；ignore 不等于“更新时保留此列”。匿名嵌入字段可以整块忽略；要比较提升字段，请使用 `Fields` 配显式 getter。
 
 ## 4. 处理策略与插入方式
 
@@ -159,14 +162,14 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 | `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.1s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正。因此 `Missing = Fix` 时必须 `Different = Fix`，否则 `Run` 直接报参数错误。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
 | `InsertPerRow` | 每个 key 一个事务 | 53s | 最慢，用于排查 |
 
-耗时是 e2e 默认参数的实测值：页、批都是 1000，事务 200 个 key，8 个写入线程持续双写，不注入故障；本机 Apple M5，MySQL 9.7.1。各模式、各参数组合的完整结果见 [e2e/README.md](e2e/README.md#参考结果)。
+下表耗时为此前 e2e 默认参数的实测记录，不作为本轮修复后的性能保证；本轮修复后的验证摘要见文末。原测试参数：页、批都是 1000，事务 200 个 key，8 个写入线程持续双写，不注入故障；本机 Apple M5，MySQL 9.7.1。各模式、各参数组合的完整结果见 [e2e/README.md](e2e/README.md#参考结果)。
 
 ## 5. 对线上代码的要求与推荐上线流程
 
 1. **双写**：线上代码在同一个事务里写老表和新表，并且 **先锁老表行，再锁新表行**，与库的加锁顺序一致，避免死锁。如果新表还没有这一行，UPDATE 影响 0 行即可，由本库补齐。
 2. **第一轮**：`Missing: Fix`，大量补齐。
 3. **第二轮**：用 `InsertBatchSnapshot` 时会修正少量旧值；用其他插入方式时应当没有需要修复的行。
-4. **第三轮**：`rep.Consistent()` 为 true，且 `Inserted`、`Updated` 都为 0，说明已经收敛。之后才能切读或切流。
+4. **后续轮次**：必须先确认 `err == nil`、启用 `CheckExtra`、双写健康且扫描边界明确，再检查 `rep.Consistent()` 和修复数。切流前还应做独立最终校验；一轮或固定三轮的零统计不是全局一致性证明。
 5. 建议先用全 `Warn` 跑一轮，看清差异规模再开启 `Fix`。
 
 ## 6. Report 字段
@@ -177,15 +180,16 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 | `Suspected` | 第一次（不加锁）比对得到的疑似差异数 |
 | `Stale` | 疑似差异中，加锁重读后发现已经一致的数量（线上并发写入导致，属正常） |
 | `Missing` / `Different` / `Extra` | 重读后确认的差异数 |
-| `Inserted` / `Updated` / `Warned` | 实际插入、覆盖、仅告警的行数 |
+| `Inserted` / `Updated` / `Warned` | 已提交的插入、覆盖，以及确认后选择仅告警策略的行数；`Warned` 不是通知成功投递数 |
 | `Retries` | 所有步骤累计重试的次数 |
 | `Duration` | 本轮耗时 |
-| `Consistent()` | 本轮没有确认任何差异 |
+| `Consistent()` | 统计中没有确认差异；必须另查 Run 的 error、是否检查 Extra 和扫描范围，不代表 Run 已成功完成或整库快照一致 |
 
-两个口径说明：
+统计口径说明：
 
 - `InsertBatchSnapshot` 插入的行没有经过重读，它的 `Missing` 是按扫描结果计的。
 - 如果事务提交时连接断开、实际却已提交，重跑时这批行会被计为 `Stale`，不计入 `Inserted`。数据是正确的，只是数字偏小。
+- 提交已确认成功时，整批差异/修复计数先全部记录；之后即使首条通知失败，Report 与最终 Progress 也不会漏掉同事务后续行。
 
 ## 7. 不用 MySQL：自己实现接口
 
@@ -206,7 +210,9 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 - 引擎串行执行，没有后台 goroutine。一批处理完才读下一批，形成天然背压。
 - 每一步失败先按 `Retry` 重试；重试次数用完，或遇到不可重试的错误，`Run` 立即停止。已提交的事务不回滚，重跑是幂等的。
 - 扫描失败时，不会处理未满的尾批。
-- mysqltable 在每张表扫描开始时，记下当前最大主键作为扫描上限，之后新插入的行留给双写保证。持续写入下，单轮不保证全局一致，需要多轮收敛（见第 5 节）。
+- mysqltable 在每张表扫描开始时记下最大主键上限。这不是时间快照：之后插入但 key 低于上限且在尚未扫描区间的行，仍可能被读到；已过游标的并发插入可能本轮漏读，依赖双写和最终验证。
+- mysqltable 扫描和查询均核对每行的实际物理表与路由。错片返回包装 `mysqltable.ErrMisrouted` 的 `*mysqltable.MisroutedError`，包含 key、实际表和期望表；`IsTransient` 不会把它当瞬时错误。数据不移动、不删除，Run 返回错误，已提交的其他批次不回滚。
+- Notifier 没有持久化队列或 outbox：失败重试可能重复，停止后未处理 Finding 可能遗漏；再次 Run 不保证重放已经修复的事件。需要可靠交付时由业务提供 outbox/持久化恢复。
 
 ## 9. 目录结构与测试
 
@@ -229,3 +235,9 @@ cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% �
 - [guide.html](guide.html)、[批量扫描演示](batch-scan-demo.html)、[单线程状态流转图](single-thread-state-flow.html)：离线交互演示（[维护说明](docs/visuals/README.md)）。
 - [状态机设计稿](docs/state-machine.md)：多表调度、逐 key 状态、检查点等后续设计，尚未实现。进度上报已经有了一个简化版，即 ⑥ 的进度回调。
 - [接口约定](docs/interface-contracts.md)：各接口的正确性约定细节。
+
+## 修复后验证摘要（2026-11-07）
+
+根模块竞态测试连续 10 轮、2,200 组策略与分页参数组合、约 102 万次 Within 模糊测试，以及 11 项真实 MySQL 集成测试连续 3 轮均通过。三种插入模式的 100 分片持续双写 E2E 最终分别逐行核对 101,785、75,059 和 29,277 行，无缺失、内容差异、错片或额外行。
+
+本轮修复包括完整 int64 容差、提升字段配置明确拒绝、整批已提交结果统计、跨 IN 分块主键锁序及物理错片显式检测。接入方需补上必填的 `Schema.KeyLess`；通知可靠性和全局快照限制仍按上文约定。

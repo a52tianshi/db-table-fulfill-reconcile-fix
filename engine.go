@@ -369,7 +369,8 @@ func (r *run[T, K]) snapshotInsert(rows []T) error {
 	return nil
 }
 
-// record counts and notifies committed findings.
+// record counts the WHOLE committed batch before attempting notifications.
+// Notification failure must not hide rows already committed in this transaction.
 func (r *run[T, K]) record(fs []Finding[T, K]) error {
 	for _, f := range fs {
 		switch f.Kind {
@@ -388,6 +389,8 @@ func (r *run[T, K]) record(fs []Finding[T, K]) error {
 		default:
 			r.rep.Warned++
 		}
+	}
+	for _, f := range fs {
 		err := r.do(fmt.Sprintf("notify %s %v", f.Kind, f.Key), func() error {
 			return r.cfg.Notifier.Notify(r.ctx, f)
 		})

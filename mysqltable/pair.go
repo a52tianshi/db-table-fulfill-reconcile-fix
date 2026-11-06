@@ -6,8 +6,8 @@
 // (reconcile.Config.Retry — IsTransient is a ready-made classifier).
 //
 // ScanPage uses keyset paging by KeyColumn, per table, up to the key of the
-// highest row seen when that table's scan started (rows inserted later are
-// left to dual writes). Repair transactions lock old rows first, then new
+// highest row seen when that table's scan started. This is a key bound,
+// not a temporal snapshot: later inserts below it may still be observed. Repair transactions lock old rows first, then new
 // rows, each in key order — online dual-write code must use the same order.
 package mysqltable
 
@@ -84,6 +84,9 @@ func (p *Pair[T, K]) fetch(ctx context.Context, q querier, r Router[K], keys []K
 	tables, groups := byTable(r, keys)
 	for _, t := range tables {
 		ks := groups[t]
+		if lock {
+			sort.SliceStable(ks, func(i, j int) bool { return p.cfg.Schema.KeyLess(ks[i], ks[j]) })
+		}
 		for len(ks) > 0 {
 			n := min(len(ks), p.cfg.InChunk)
 			args := make([]any, n)
@@ -93,6 +96,9 @@ func (p *Pair[T, K]) fetch(ctx context.Context, q querier, r Router[K], keys []K
 			rows, err := p.query(ctx, q, p.q.in(t, n, lock), args...)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", t, err)
+			}
+			if err := p.checkRouting(r, t, rows); err != nil {
+				return nil, err
 			}
 			for _, v := range rows {
 				out[p.cfg.Schema.Key(v)] = v
@@ -138,6 +144,9 @@ func (s source[T, K]) ScanPage(ctx context.Context, c reconcile.Cursor, limit in
 			if err != nil {
 				return nil, nil, fmt.Errorf("%s: %w", t, err)
 			}
+			if err := p.checkRouting(s.r, t, top); err != nil {
+				return nil, nil, err
+			}
 			if len(top) == 0 {
 				cur = scanCursor{table: cur.table + 1} // empty table
 				continue
@@ -153,6 +162,9 @@ func (s source[T, K]) ScanPage(ctx context.Context, c reconcile.Cursor, limit in
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", t, err)
+		}
+		if err := p.checkRouting(s.r, t, rows); err != nil {
+			return nil, nil, err
 		}
 		var next reconcile.Cursor
 		switch {

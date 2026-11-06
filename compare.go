@@ -35,11 +35,21 @@ func Eq[T any, V comparable](name string, get func(T) V) Field[T] {
 	return Field[T]{Name: name, Equal: func(a, b T) bool { return get(a) == get(b) }}
 }
 
-// Within tolerates |old-new| <= tolerance, e.g. timestamps written separately.
+// Within tolerates |old-new| <= tolerance without int64 subtraction overflow.
+// It panics at construction if tolerance is negative.
 func Within[T any](name string, get func(T) int64, tolerance int64) Field[T] {
+	if tolerance < 0 {
+		panic("reconcile.Within: tolerance must be >= 0")
+	}
 	return Field[T]{Name: name, Equal: func(a, b T) bool {
-		d := get(a) - get(b)
-		return -tolerance <= d && d <= tolerance
+		x, y := get(a), get(b)
+		var distance uint64
+		if x >= y {
+			distance = uint64(x) - uint64(y)
+		} else {
+			distance = uint64(y) - uint64(x)
+		}
+		return distance <= uint64(tolerance)
 	}}
 }
 
@@ -64,7 +74,9 @@ func Fields[T any](fields ...Field[T]) Comparator[T] {
 // reflect.DeepEqual. A Field in custom
 // replaces the default comparison of the struct field with the same Name
 // (e.g. Within for a timestamp). Unknown names are an error, so a typo can
-// never silently disable a comparison.
+// never silently disable a comparison. Names must refer to top-level fields;
+// promoted fields of anonymous embeddings are rejected. Ignore the whole
+// embedding or use Fields with explicit getters for promoted fields.
 func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 	rt := reflect.TypeOf((*T)(nil)).Elem()
 	if rt.Kind() != reflect.Struct {
@@ -72,15 +84,23 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 	}
 	skip := map[string]bool{}
 	for _, n := range ignore {
-		if _, ok := rt.FieldByName(n); !ok {
+		sf, ok := rt.FieldByName(n)
+		if !ok {
 			return nil, fmt.Errorf("Struct: unknown field %q in ignore", n)
+		}
+		if len(sf.Index) != 1 {
+			return nil, fmt.Errorf("Struct: %q must name a top-level field; promoted fields are not supported", n)
 		}
 		skip[n] = true
 	}
 	over := map[string]Field[T]{}
 	for _, f := range custom {
-		if _, ok := rt.FieldByName(f.Name); !ok || f.Equal == nil {
+		sf, ok := rt.FieldByName(f.Name)
+		if !ok || f.Equal == nil {
 			return nil, fmt.Errorf("Struct: invalid custom field %q", f.Name)
+		}
+		if len(sf.Index) != 1 {
+			return nil, fmt.Errorf("Struct: %q must name a top-level field; promoted fields are not supported", f.Name)
 		}
 		over[f.Name] = f
 	}
