@@ -22,6 +22,10 @@ type Config[T any, K comparable] struct {
 	ExtraCheck ExtraCheck     // CheckExtra or SkipExtra
 	Repairer   Repairer[T, K] // transactions for recheck and fix
 	Notifier   Notifier[T, K] // receives every confirmed finding
+	// Progress is called synchronously after every completed batch, at each
+	// phase end, and once at the end (Done). Use NoProgress to opt out, or
+	// LogProgress for a throttled log line. Keep it fast: it blocks the Run.
+	Progress func(Progress)
 
 	// --- sizes ---
 	ScanPageSize int // rows per ScanPage call, > 0
@@ -62,6 +66,7 @@ func (c *Config[T, K]) validate() error {
 	check(c.Compare != nil, "Compare is required")
 	check(c.Repairer != nil, "Repairer is required")
 	check(c.Notifier != nil, "Notifier is required")
+	check(c.Progress != nil, "Progress is required (use reconcile.NoProgress to opt out)")
 	check(c.Policy.Missing == Warn || c.Policy.Missing == Fix, "Policy.Missing must be Warn or Fix, got %v", c.Policy.Missing)
 	check(c.Policy.Different == Warn || c.Policy.Different == Fix, "Policy.Different must be Warn or Fix, got %v", c.Policy.Different)
 	check(c.Insert >= InsertBatchLocked && c.Insert <= InsertBatchSnapshot, "Insert must be InsertBatchLocked, InsertPerRow or InsertBatchSnapshot, got %v", c.Insert)

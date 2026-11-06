@@ -81,6 +81,7 @@ func Example() {
 		ExtraCheck: r.CheckExtra,
 		Repairer:   pair.Repairer(),
 		Notifier:   r.LogNotifier[Order, OrderKey]{W: os.Stderr},
+		Progress:   r.LogProgress(os.Stderr, 10*time.Second), // or r.NoProgress
 
 		ScanPageSize: 1000,     // rows per scan query
 		BatchSize:    1000,     // rows paired per lookup of the other side

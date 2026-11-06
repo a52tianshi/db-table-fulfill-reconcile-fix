@@ -34,6 +34,7 @@ func Example() {
 		ExtraCheck: r.CheckExtra,
 		Repairer:   store,
 		Notifier:   r.LogNotifier[Order, int]{W: os.Stdout},
+		Progress:   r.NoProgress,
 
 		ScanPageSize: 1000,
 		BatchSize:    1000,

@@ -19,9 +19,11 @@ func Run[T any, K comparable](ctx context.Context, cfg Config[T, K]) (rep Report
 	if err := cfg.validate(); err != nil {
 		return rep, err
 	}
-	start := time.Now()
-	defer func() { rep.Duration = time.Since(start) }()
-	r := &run[T, K]{cfg: cfg, ctx: ctx, rep: &rep}
+	r := &run[T, K]{cfg: cfg, ctx: ctx, rep: &rep, start: time.Now()}
+	defer func() {
+		rep.Duration = time.Since(r.start)
+		r.progress(false, true, err)
+	}()
 	r.grouper, _ = cfg.Repairer.(Grouper[K])
 	if err = r.pass(false); err != nil {
 		return rep, err
@@ -39,6 +41,19 @@ type run[T any, K comparable] struct {
 	grouper Grouper[K]
 	ctx     context.Context
 	rep     *Report
+	start   time.Time
+
+	phase          Phase
+	batches, pages int
+}
+
+func (r *run[T, K]) progress(phaseDone, done bool, err error) {
+	rep := *r.rep
+	rep.Duration = time.Since(r.start)
+	r.cfg.Progress(Progress{
+		Phase: r.phase, Batch: r.batches, Pages: r.pages, PhaseDone: phaseDone,
+		Report: rep, Elapsed: rep.Duration, Done: done, Err: err,
+	})
 }
 
 // buffer holds one batch of scanned rows; it never evicts.
@@ -58,9 +73,12 @@ func (r *run[T, K]) pass(reverse bool) error {
 	cfg := &r.cfg
 	src, dst, side := cfg.Old, cfg.New, "old"
 	counter := &r.rep.OldScanned
+	r.phase = ScanOld
 	if reverse {
 		src, dst, side, counter = cfg.New, cfg.Old, "new", &r.rep.NewScanned
+		r.phase = ScanNew
 	}
+	r.batches, r.pages = 0, 0
 	b := &buffer[T, K]{seen: make(map[K]struct{}, cfg.BatchSize)}
 	flush := func() error {
 		if len(b.keys) == 0 {
@@ -70,6 +88,8 @@ func (r *run[T, K]) pass(reverse bool) error {
 			return err
 		}
 		b.reset()
+		r.batches++
+		r.progress(false, false, nil)
 		return nil
 	}
 	var cursor Cursor
@@ -86,6 +106,7 @@ func (r *run[T, K]) pass(reverse bool) error {
 		if err != nil {
 			return err // the unfinished tail batch is never judged
 		}
+		r.pages++
 		if len(rows) > cfg.ScanPageSize {
 			return fmt.Errorf("scan %s page %d: %d rows exceed ScanPageSize %d", side, page, len(rows), cfg.ScanPageSize)
 		}
@@ -113,7 +134,11 @@ func (r *run[T, K]) pass(reverse bool) error {
 			}
 		}
 		if next == nil {
-			return flush()
+			if err := flush(); err != nil {
+				return err
+			}
+			r.progress(true, false, nil)
+			return nil
 		}
 		cursor = next
 	}

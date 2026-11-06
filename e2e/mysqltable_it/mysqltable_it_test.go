@@ -296,6 +296,7 @@ func TestRunConvergesWithOddSizes(t *testing.T) {
 		Policy: r.Policy{Missing: r.Fix, Different: r.Fix}, Insert: r.InsertBatchLocked,
 		ExtraCheck: r.CheckExtra, Repairer: p.Repairer(),
 		Notifier:     r.LogNotifier[store.Order, store.Key]{W: os.Stderr},
+		Progress:     r.NoProgress,
 		ScanPageSize: 7, BatchSize: 13, TxBatchSize: 5,
 		MemoryLimit: 500, RowSize: func(store.Order) int64 { return 60 },
 		Retry: r.Retry{MaxAttempts: 3, Backoff: time.Millisecond, MaxBackoff: 10 * time.Millisecond, Retryable: mysqltable.IsTransient},

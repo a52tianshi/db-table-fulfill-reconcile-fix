@@ -48,6 +48,7 @@ func config(s *memtable.Store[row, int]) r.Config[row, int] {
 		ExtraCheck: r.CheckExtra,
 		Repairer:   s,
 		Notifier:   r.LogNotifier[row, int]{W: io.Discard},
+		Progress:   r.NoProgress,
 
 		ScanPageSize: 2,
 		BatchSize:    2,
@@ -451,7 +452,7 @@ func TestEmptyConfigListsEveryProblem(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"Old", "New", "Key", "Compare", "Repairer", "Notifier", "Policy.Missing",
+	for _, want := range []string{"Old", "New", "Key", "Compare", "Repairer", "Notifier", "Progress", "Policy.Missing",
 		"Policy.Different", "Insert", "ExtraCheck", "ScanPageSize", "BatchSize", "TxBatchSize", "MemoryLimit",
 		"Retry.MaxAttempts", "Retry.Backoff", "Retry.Retryable"} {
 		if !strings.Contains(err.Error(), want) {

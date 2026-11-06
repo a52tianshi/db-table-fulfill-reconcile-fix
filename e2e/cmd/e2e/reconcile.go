@@ -25,6 +25,7 @@ func reconcileCmd(fs *flag.FlagSet) func(context.Context, *sql.DB) error {
 	attempts := fs.Int("retry-attempts", 8, "Retry.MaxAttempts per step")
 	backoff := fs.Duration("retry-backoff", 5*time.Millisecond, "Retry.Backoff")
 	maxBackoff := fs.Duration("retry-max-backoff", 500*time.Millisecond, "Retry.MaxBackoff")
+	progressEvery := fs.Duration("progress-every", 2*time.Second, "progress log interval (0 = no progress output)")
 	failRate := fs.Float64("fail-rate", 0, "inject transient failures into this fraction of scan/lookup/tx calls")
 	ignore := fs.String("ignore", "", "comma separated Order fields allowed to differ, e.g. UpdatedAt")
 	label := fs.String("label", "reconcile", "name printed in the report")
@@ -59,6 +60,10 @@ func reconcileCmd(fs *flag.FlagSet) func(context.Context, *sql.DB) error {
 		if *memLimit > 0 {
 			rowSize = func(o store.Order) int64 { return int64(48 + len(o.Remark)) }
 		}
+		progress := r.NoProgress
+		if *progressEvery > 0 {
+			progress = r.LogProgress(os.Stdout, *progressEvery)
+		}
 		chaos := store.NewChaos(*failRate, time.Now().UnixNano())
 		// Unknown flag values map to the zero value, which Run rejects.
 		rep, err := r.Run(ctx, r.Config[store.Order, store.Key]{
@@ -71,6 +76,7 @@ func reconcileCmd(fs *flag.FlagSet) func(context.Context, *sql.DB) error {
 			ExtraCheck: r.CheckExtra,
 			Repairer:   chaos.Repairer(pair.Repairer()),
 			Notifier:   r.LogNotifier[store.Order, store.Key]{W: os.Stdout},
+			Progress:   progress,
 
 			ScanPageSize: *page,
 			BatchSize:    *batch,

@@ -72,6 +72,7 @@ E2E_MYSQL_DSN='user:pass@tcp(host:3306)/db' ./run.sh
 bin/e2e reconcile -missing warn -different warn      # 只告警
 bin/e2e reconcile -insert batch-locked -tx-batch 100 -memory-limit 1048576 -ignore UpdatedAt
 bin/e2e reconcile -fail-rate 1 -retry-attempts 3     # 每次调用都失败: 重试 3 次后 Run 退出
+bin/e2e reconcile -progress-every 500ms              # 进度日志间隔（0 = 不输出进度）
 ```
 
 `run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始和提交前，按 2% 概率注入一个伪造的死锁错误（`internal/store/chaos.go`），验证每一步都会被重试。报告中的 `injected` 应当等于 `retries`。设为 `FAIL_RATE=0` 可以关闭注入。

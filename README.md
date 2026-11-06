@@ -78,6 +78,7 @@ flowchart LR
 | `ExtraCheck` | `CheckExtra` / `SkipExtra` | 是否反向扫描新表，找出只在新表存在的行 |
 | `Repairer` | `pair.Repairer()` | |
 | `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 每条确认的差异都会在事务提交后回调（包括已修复的） |
+| `Progress` | `r.LogProgress(os.Stderr, 10*time.Second)` / `r.NoProgress` / 自己的函数 | 进度回调，见 ⑥ |
 | `ScanPageSize` | 1000 | 每条扫描 SQL 读多少行 |
 | `BatchSize` | 1000 | 攒多少行做一次另一侧的批量查询 |
 | `TxBatchSize` | 200 | 一个复核或插入事务最多处理多少个 key。mysqltable 还保证一个事务只涉及一张新分表 |
@@ -100,6 +101,31 @@ flowchart LR
 - context 取消、`ErrConflict`、引擎自身的不变量错误（例如重复 key）不会重试。
 - 事务整体重跑：事务内是先加锁重读、再写入，所以即使上次提交结果未知，重跑也是安全的。
 - `Report.Retries` 记录了总共重试的次数。
+
+### ⑥ Progress：进度回调
+
+`Progress func(reconcile.Progress)` 在以下时机被**同步**调用：
+
+- 每批处理完之后：这一批已经查询过另一侧，复核、插入或更新都已提交，所以数字都是已落库的结果。
+- 每个阶段结束时（`PhaseDone=true`）：正向扫描老表结束、反向扫描新表结束。
+- Run 结束时调最后一次（`Done=true`）；出错退出时同时带上 `Err`。参数检查失败时不会回调。
+
+| 字段 | 含义 |
+|---|---|
+| `Phase` | `ScanOld`（扫描老表，找缺失和不同）/ `ScanNew`（扫描新表，找仅新表有的行） |
+| `Batch` / `Pages` | 本阶段已完成的批数 / 已扫描的页数 |
+| `Report` | 截至此刻的累计数字，字段同第 6 节 |
+| `Elapsed` | 已运行时间 |
+| `PhaseDone` / `Done` / `Err` | 见上 |
+
+- `r.LogProgress(w, every)`：最多每 `every` 打一行，阶段结束和 Run 结束时一定会打。
+- `r.NoProgress`：明确表示不需要进度。
+- 回调会阻塞 Run：要推监控或写库的话，回调里只做投递，不要等结果。想中途停止请取消 `ctx`，回调不能中断 Run。
+- 没有百分比：引擎不知道总行数。需要的话，用 `information_schema.TABLES.TABLE_ROWS` 的估算值和 `Report.OldScanned` 自己算。
+
+```
+reconcile progress phase=old batch=15 pages=15 scanned old=15000 new=0 | missing=15000 different=0 extra=0 | inserted=15000 updated=0 warned=0 | retries=558 | 18s | running
+```
 
 ## 3. 比对规则：允许部分字段不一致
 
@@ -176,7 +202,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 ## 9. 目录结构与测试
 
 ```
-.                  核心：types.go 接口 / config.go 参数与校验 / engine.go 引擎 / retry.go 重试 / compare.go 比对 / notify.go / report.go
+.                  核心：types.go 接口 / config.go 参数与校验 / engine.go 引擎 / retry.go 重试 / progress.go 进度 / compare.go 比对 / notify.go / report.go
 ├── mysqltable/    MySQL 实现：Router 分表规则、Schema、Pair（Source + Repairer）
 ├── memtable/      内存实现（单测、示例用）
 ├── e2e/           独立模块：真实 MySQL 端到端测试（1 老表 + 100 分表 + 持续双写）
@@ -184,7 +210,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 ```
 
 ```sh
-go test -race ./...      # 单测：engine_test / compare_test / memtable / mysqltable（不需要数据库）
+go test -race ./...      # 单测：engine_test / compare_test / progress_test / memtable / mysqltable（不需要数据库）
 cd e2e && go test ./...  # mysqltable 集成测试：连真实 MySQL，连不上自动跳过
 cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% 的 SQL 调用注入失败，验证重试。详见 e2e/README.md
 ```
