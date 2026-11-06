@@ -127,3 +127,35 @@ func TestReviewerReclassifiesExtra(t *testing.T) {
 		t.Fatalf("%v %+v", err, s.Events)
 	}
 }
+
+type batchStore struct {
+	*memory.Store
+	calls, rows int
+}
+
+func (b *batchStore) ReviewMissing(ctx context.Context, cs []r.Candidate[memory.Row, int], m r.Mode) error {
+	b.calls++
+	for _, c := range cs {
+		if c.Kind != r.Missing || !c.HasOld || c.HasNew {
+			return errors.New("non-missing candidate in batch")
+		}
+		b.rows++
+		if err := b.Store.Review(ctx, c, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func TestMissingBatchReviewerOnlyInRepair(t *testing.T) {
+	s, e := fixture()
+	s.Old[5] = memory.Row{Identifier: 5, Value: "missing too"}
+	b := &batchStore{Store: s}
+	e.Reviewer = b
+	if _, err := e.Run(context.Background(), r.AlertOnly); err != nil || b.calls != 0 {
+		t.Fatalf("alert mode used batch: %v calls=%d", err, b.calls)
+	}
+	stats, err := e.Run(context.Background(), r.Repair)
+	if err != nil || b.rows != 2 || stats.Candidates != 4 || s.New[3] != s.Old[3] || s.New[5] != s.Old[5] || s.New[2] != s.Old[2] {
+		t.Fatalf("%+v %v rows=%d %+v", stats, err, b.rows, s.New)
+	}
+}

@@ -56,6 +56,17 @@ type Candidate[T any, K comparable] struct {
 type Reviewer[T any, K comparable] interface {
 	Review(context.Context, Candidate[T, K], Mode) error
 }
+
+// MissingBatchReviewer is optional. When the Reviewer also implements it and
+// mode is Repair, all Missing candidates of one forward batch are handed over
+// in a single call; Different/Extra still go through Review one by one.
+// The implementation chooses its safety level: reread old under lock (exact),
+// or insert the scanned snapshot (faster; a stale value written this way is
+// only corrected by a later pass whose Review rereads). Return only after
+// commit; an error stops Run.
+type MissingBatchReviewer[T any, K comparable] interface {
+	ReviewMissing(context.Context, []Candidate[T, K], Mode) error
+}
 type Engine[T any, K comparable] struct {
 	Old, New  Source[T, K]
 	Records   Records[T, K]
@@ -83,6 +94,11 @@ func (e Engine[T, K]) Run(ctx context.Context, mode Mode) (s Stats, err error) {
 		}
 		return nil
 	}
+	batcher, _ := e.Reviewer.(MissingBatchReviewer[T, K])
+	if mode != Repair {
+		batcher = nil
+	}
+	var missing []Candidate[T, K]
 	// Each batch is fully paired before the scanner is allowed to continue.
 	pass := func(source, target Source[T, K], reverse bool) error {
 		e.Cache.Reset()
@@ -127,6 +143,10 @@ func (e Engine[T, K]) Run(ctx context.Context, mode Mode) (s Stats, err error) {
 				c := Candidate[T, K]{Key: k, Old: v, HasOld: true, New: other, HasNew: found}
 				if !found {
 					c.Kind = Missing
+					if batcher != nil {
+						missing = append(missing, c)
+						continue
+					}
 				} else if !e.Records.Equal(v, other) {
 					c.Kind = Different
 				} else {
@@ -135,6 +155,16 @@ func (e Engine[T, K]) Run(ctx context.Context, mode Mode) (s Stats, err error) {
 				if err := review(c); err != nil {
 					return err
 				}
+			}
+			if len(missing) > 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				s.Candidates += len(missing)
+				if err := batcher.ReviewMissing(ctx, missing, mode); err != nil {
+					return fmt.Errorf("review %d missing: %w", len(missing), err)
+				}
+				missing = missing[:0]
 			}
 			e.Cache.Reset()
 			keys = keys[:0]
