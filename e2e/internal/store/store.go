@@ -1,5 +1,5 @@
-// Package store holds the MySQL schema, snowflake ids and the reconcile adapter
-// used by the end-to-end test. Old table: orders_old. New tables: orders_new_00
+// Package store holds the e2e MySQL schema, snowflake ids and the mapping
+// onto the library's mysqltable adapter. Old table: orders_old. New tables: orders_new_00
 // .. orders_new_99, routed by user_id % 100. order_id / user_id are immutable.
 package store
 
@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/mysqltable"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -113,6 +114,7 @@ func Retryable(err error) bool {
 	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
 }
 
+// IsDuplicate reports a duplicate key error.
 func IsDuplicate(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && me.Number == 1062
@@ -147,4 +149,28 @@ func (s *Snowflake) Next() int64 {
 	}
 	s.lastMs = ms
 	return (ms-snowEpoch)<<22 | (s.Worker&1023)<<12 | s.seq
+}
+
+// Schema maps Order onto the library's MySQL adapter.
+func Schema() mysqltable.Schema[Order, Key] {
+	return mysqltable.Schema[Order, Key]{
+		Columns:   strings.Split(Cols, ","),
+		KeyColumn: "order_id",
+		Key:       KeyOf,
+		KeyValue:  func(k Key) any { return k.OrderID },
+		Values:    Order.Args,
+		Scan: func(scan func(...any) error) (Order, error) {
+			return ScanOrder(scanFunc(scan))
+		},
+	}
+}
+
+type scanFunc func(...any) error
+
+func (f scanFunc) Scan(dest ...any) error { return f(dest...) }
+
+// Routers: one old table; new tables sharded by user_id % 100.
+func OldRouter() mysqltable.Router[Key] { return mysqltable.Single[Key](OldTable) }
+func NewRouter() mysqltable.Router[Key] {
+	return mysqltable.Mod("orders_new_%02d", Shards, func(k Key) int64 { return k.UserID })
 }

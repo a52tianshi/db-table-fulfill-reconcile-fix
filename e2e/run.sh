@@ -14,7 +14,7 @@ GAP=${GAP:-10}                # seconds between step 3 and step 4
 BATCH=${BATCH:-1000}
 PAGE=${PAGE:-1000}           # keyset scan page for old and new tables
 DIST=${DIST:-skew}            # skew | uniform
-INSERT_MODE=${INSERT_MODE:-batch-snapshot}  # row | batch-locked | batch-snapshot
+INSERT_MODE=${INSERT_MODE:-batch-snapshot}  # per-row | batch-locked | batch-snapshot
 export E2E_MYSQL_DSN=${E2E_MYSQL_DSN:-"root@tcp(127.0.0.1:3306)/reconcile_e2e"}
 
 mkdir -p bin logs

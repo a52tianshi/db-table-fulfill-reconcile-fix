@@ -1,6 +1,8 @@
 # MySQL 端到端测试
 
-独立 Go module（通过 `replace ../` 引用框架），MySQL 驱动只在这里引入，根模块仍零依赖。
+独立 Go module（通过 `replace ../` 引用本库），MySQL 驱动只在这里引入，根模块仍零依赖。
+
+被测对象就是库本身：`cmd/e2e/reconcile.go` 用 `mysqltable.NewPair` + `reconcile.New` 接入，`internal/store` 只有表结构、`Schema` 映射、分表规则、雪花 ID 和数据分布。writer（模拟线上双写）与 verify（独立逐行比对）不依赖库。
 
 ## 模型
 
@@ -27,7 +29,7 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 |---|---|---|
 | `batch-snapshot`（默认） | 每个分片一条多行 INSERT，直接用扫描时的值。最快；扫描后被更新的行会以旧值写入 | 无缺失/额外；允许覆盖若干"不同"（就是这些旧值） |
 | `batch-locked` | 每个分片一个事务，`FOR UPDATE` 重读老表后多行 INSERT | 0 修复 |
-| `row` | 逐条事务复核插入 | 0 修复 |
+| `per-row` | 逐条事务复核插入 | 0 修复 |
 
 "内容不同"和"仅新表存在"始终逐条复核。三种方式都要求第三轮在写入仍进行时 0 修复。
 
@@ -57,6 +59,10 @@ cd e2e
 ROWS=200000 WORKERS=16 GAP=20 ./run.sh       # 加大规模
 INIT_ARGS="-copy-ratio 0.5 -dirty-ratio 0.3" ./run.sh   # 预置部分新表数据(含旧值)，覆盖"不同→覆盖"分支
 E2E_MYSQL_DSN='user:pass@tcp(host:3306)/db' ./run.sh
+
+# 单独使用子命令（参数见 bin/e2e <cmd> -h）
+bin/e2e reconcile -missing warn -different warn      # 只告警
+bin/e2e reconcile -insert batch-locked -tx-batch 100 -memory-limit 1048576 -ignore UpdatedAt
 ```
 
 `init` 会 **DROP 并重建** DSN 指定库中的上述 101 张表。writer 日志在 `logs/writer.log`。

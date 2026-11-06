@@ -1,0 +1,18 @@
+// Package reconcile compares an authoritative old table with a new table
+// (possibly sharded), and warns about or fixes the differences.
+//
+// For every batch of scanned old rows, the new side is looked up in one call
+// and compared. Suspected differences are never acted on directly: they are
+// reread inside a transaction (with row locks, old side first), classified
+// again from the fresh state, and only then warned or fixed per Policy.
+// Rows only present in new are warned, never deleted.
+//
+// You provide (or take from package mysqltable):
+//
+//	Source     old/new Scan + batch Lookup (sharding lives here)
+//	Repairer   transactions: Lock-reread, Insert (batch), Update (single row)
+//	Comparator which fields must match, which may differ (Exact, Fields, Struct)
+//	Policy     Warn or Fix per Missing / Different
+//
+// Package memtable is an in-memory implementation for tests and examples.
+package reconcile
