@@ -1,36 +1,40 @@
-<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>表数据核对与修复 · 运行流程</title>
-<style>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>分片批量核对 · 状态机草稿</title><style>
 :root{font-family:system-ui,-apple-system,sans-serif;color:#173347;background:#f0f4f7;line-height:1.75}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:36px 24px 70px}header{background:#12354b;color:#fff;padding:38px;border-radius:18px}h1{font-size:36px;line-height:1.3;margin:12px 0}h2{margin-top:44px}small{letter-spacing:2px;color:#8ee3cf}.subtitle{color:#c4dbe7}.steps{display:grid;grid-template-columns:1fr 1fr;gap:20px}.step{background:#fff;border:1px solid #d7e1e7;border-radius:12px;padding:24px}.num{display:inline-grid;place-items:center;border-radius:50%;background:#127c69;color:#fff;width:32px;height:32px;margin-right:10px}.step h3{margin:0 0 10px}.arrow{text-align:center;color:#127c69;font-size:28px}.transaction{border:2px solid #127c69;background:#edf9f4;padding:26px;border-radius:14px}.branches{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:20px 0}.branch{padding:20px;background:white;border-top:4px solid #168771;border-radius:8px}.extra{border-color:#d79726}.note{border-left:4px solid #d79726;background:#fff4dd;padding:18px 24px}.path{padding:20px;background:#12354b;color:#e4fff7;border-radius:10px;overflow-wrap:anywhere}code{background:#e2ecef;padding:2px 5px;border-radius:4px}a{color:#0b7564}header a{color:#9cead6}li{margin-bottom:8px}details{background:white;padding:18px;border-radius:10px;margin:12px 0}footer{margin-top:45px;color:#657b89}@media(max-width:700px){main{padding:16px}header{padding:24px}h1{font-size:28px}.steps,.branches{grid-template-columns:1fr}}@media print{body{background:white}header{background:white;color:#173347;border:1px solid}small,.subtitle{color:#173347}.step,.transaction{break-inside:avoid}}
-</style></head>
-<body><main>
-<header><small>GO INTERFACE · 有界批处理 · 业务控制事务</small><h1>先发现疑似差异，<br>再在事务内做最终决定。</h1><p class="subtitle">老表为权威：缺失补齐、差异覆盖、额外记录保留并报警。</p><p><a href="README.md">README</a> · <a href="reconcile.go">核心源码</a> · <a href="docs/interface-contracts.md">完整接口约定</a></p></header>
-<h2>一眼看懂整轮流程</h2>
-<div class="path">老表扫描 → 缓存一批 → 完整查询新表 → 比较并筛出候选 → 业务事务复核 → 清空缓存继续<br>老表扫描完成 → 反向扫描新表 → 按批查询老表 → 复核额外记录 → 只报警，不删除</div>
-<h2>第一遍：从老表找缺失和差异</h2>
-<div class="steps">
-<section class="step"><h3><span class="num">1</span>逐条扫描老表</h3><p><code>Old.Scan</code> 同步产出记录，<code>Records.Key</code> 提取稳定唯一的 identifier。写入注入的 <code>Cache</code>。</p><p>尚未满批时继续扫描；缓存不会累计整张表。</p></section>
-<section class="step"><h3><span class="num">2</span>批满后暂停读取</h3><p>达到 <code>BatchSize</code> 就同步处理整批。查询和复核返回以前，不再读取下一批，这就是背压。</p><p>只有 Scan 成功结束，才处理剩余尾批；扫描报错则停止。</p></section>
-<section class="step"><h3><span class="num">3</span>完整查询新表</h3><p><code>New.Lookup(keys)</code> 必须完整解析这一批 key。成功结果中缺少 key，才形成“疑似缺失”。</p><p>分页不完整、超时或部分失败必须报错，不能把它们当作查无记录。</p></section>
-<section class="step"><h3><span class="num">4</span>缓存比较只筛候选</h3><p>新表存在且 <code>Records.Equal</code> 相等：跳过。缺失或内容不同：交给 <code>Reviewer.Review</code>。</p><p>候选只是线索，不是写入指令；此处没有数据库写操作。</p></section>
-</div>
-<p class="note">关键区别：不是“一边扫新表，一边把没遇到的 key 当缺失”。每批都通过完整批量查询配对，避免把“尚未扫到”误判为“不存在”。</p>
-<div class="arrow">↓</div>
-<section class="transaction"><h2 style="margin-top:0">业务事务边界：重新读取，重新分类</h2><p>调用方的 Reviewer 开启事务 → 重读老表和新表 → 按新状态再次比较 → 报警或修复 → 提交。框架不替业务控制事务，也不绑定 SQL。</p>
-<div class="branches"><div class="branch"><strong>老有 / 新无</strong><p>只报警模式：报警。<br>修复模式：从老表插入新表。</p></div><div class="branch"><strong>两边存在但不同</strong><p>只报警模式：报警。<br>修复模式：用老表覆盖新表。</p></div><div class="branch extra"><strong>仅新表存在</strong><p>两种模式都保留并报警，绝不删除。</p></div></div>
-<p>两端已相等，或者两端都已不存在：跳过。即使候选原先显示“缺失”，也必须以事务内新状态为准。内存示例用同一把锁模拟这个边界。</p></section>
-<div class="arrow">↓</div>
-<section class="step"><h3>清空当前批缓存，继续下一批</h3><p>每批最多缓存 BatchSize 条。当前批处理完成才清空并继续；没有后台候选队列。老表完整扫描并处理尾批以后，才能进入第二遍。</p></section>
-<h2>第二遍：找仅新表存在的记录</h2>
-<div class="path">New.Scan → 缓存一批新表记录 → Old.Lookup(keys) 完整查询 → 老表查无记录 → Extra 候选 → Reviewer 重读两端并重新分类</div>
-<p>这次扫描专门发现额外记录。复核后若依然只有新表存在，保留并报警；若并发变化让它变成其他情况，则按最新状态处理。核心没有删除接口。</p>
-<h2>接口分别负责什么</h2>
-<ul><li><strong>Source：</strong>流式扫描和完整批量查询；负责底层查询、分页、扫描快照和 context 传播。</li><li><strong>Records：</strong>提取唯一键，定义业务内容相等；忽略哪些字段由调用方决定。</li><li><strong>Cache：</strong>保存当前批次；不可静默淘汰。默认 MemoryCache 有条数限制。</li><li><strong>Reviewer：</strong>事务重读、最终比较、告警与可选修复；不得直接信任候选快照。</li><li><strong>Engine：</strong>串行编排两个方向的分批配对、候选分发、清理与失败返回。</li></ul>
-<h2>运行、失败与一致性</h2>
-<details open><summary><strong>如何运行示例</strong></summary><p>在仓库根目录执行 <code>go run ./cmd/demo</code>。先运行 AlertOnly，再运行 Repair；示例最终保留额外记录，补齐缺失记录，覆盖不同内容。</p><p>验证命令：<code>go test -race ./...</code> 和 <code>go vet ./...</code>。需要 Go 1.22+，无第三方依赖。</p></details>
-<details><summary><strong>有界内存和取消</strong></summary><p>引擎缓存、key 和查询结果均为 O(BatchSize)，按条数而非字节计算。驱动与扫描器也需限制缓冲。内存示例复制全量 key，仅用于演示；生产应实现 keyset 分页并定义快照边界。</p><p>取消通过 context 传播，不能强制终止不响应取消的业务回调。Engine 和缓存不能在多轮并发运行间共享使用。</p></details>
-<details><summary><strong>错误如何处理</strong></summary><p>扫描、查询、缓存或复核任一失败，立即停止并返回部分统计，错误支持 errors.Is。已经提交的批次不回滚，业务处理须支持幂等重跑。Candidates 表示复核调用次数，不表示已确认修复数量。</p></details>
-<details open><summary><strong>“在线使用”不等于完整不停机迁移保证</strong></summary><p>事务复核只保护已发现的候选。并发修改仍可能造成扫描遗漏、重复候选或相等记录随后变化，不能保证单轮全局收敛。生产需结合一致性快照、高水位、版本校验、CDC 或定期重跑。</p><p>同 MySQL 实例可让业务复核共享事务；锁、唯一约束、缺失行的并发插入竞争及重试由适配器处理。跨实例需要独立的一致性方案。</p><p>当前 MVP 不含全量复制、增量同步、切流、持久化进度或真实 MySQL 适配器。</p></details>
-<footer>自包含离线 HTML，无外部依赖 · db-table-fulfill-reconcile-fix · 2026-11-06</footer>
-</main></body></html>
+.columns{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.controls{display:flex;align-items:center;gap:12px;margin:18px 0;flex-wrap:wrap}button{font:inherit;padding:8px 16px;border:1px solid #127c69;border-radius:8px;background:white;color:#0a6656;cursor:pointer}button:disabled{opacity:.4;cursor:default}@media(max-width:850px){.columns{grid-template-columns:1fr}}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px;background:white}th,td{text-align:left;padding:12px;border-bottom:1px solid #d7e1e7;white-space:nowrap}th{background:#e6eff2}.metrics{display:grid;grid-template-columns:1fr 3fr;gap:16px;margin:20px 0}.metric{background:white;border:1px solid #d7e1e7;padding:20px;border-radius:12px}.metric strong{font-size:32px;color:#127c69}.counts{display:flex;gap:10px;flex-wrap:wrap}.count{padding:6px 10px;background:#edf5f3;border-radius:6px}.split{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:850px){.split,.metrics{grid-template-columns:1fr}}</style></head><body><main><header><small>有状态 · 分片 · 有界批处理 / 设计稿</small><h1>记录逐条记状态，<br>数据库按批次交互。</h1><p class="subtitle">一张 user_old，对应同结构的 user_new_shard_1 … user_new_shard_100。用内存配对和攒批，减少数据库往返、重复查询与事务提交。</p><p><a href="README.md">README</a> · <a href="docs/state-machine.md">Markdown 设计</a></p></header>
+<p class="note"><strong>设计与实现分开：</strong>本页是下一版方案及离线演示。现有 Go MVP 仍是单表对批量查询、逐候选复核；尚未实现分片路由、批量扫描接口、批量事务回调或逐条状态监控。本页不连接数据库。</p>
+<section class="step"><h2 style="margin-top:0">新增：更具体的独立演示</h2><p><a href="batch-scan-demo.html"><strong>扫描 50 条的多 shard 批量演示</strong></a>：13 种场景、逐条状态、各 shard 进度、失败和回滚。</p><p><a href="single-thread-state-flow.html"><strong>单线程整体状态流转图</strong></a>：点击节点查看执行步骤，明确循环、事务和安全游标。</p></section><h2>01 / 拓扑简单，状态分层</h2><div class="path">user_old → 可注入的分片路由 → user_new_shard_1 … user_new_shard_100</div><p>这是同一个逻辑数据集，不是 100 组独立业务表。Memory 在这个数据集内以 identifier 为唯一 key；同 key 的两端观测合并到一条记录，并保存目标分片。若未来支持多个逻辑数据集，再增加数据集命名空间。</p><div class="columns"><section class="step"><h3>老表逐表状态</h3><p>每张表记录未开始、扫描中、缓存满暂停、扫描结束、失败。字段包括读取游标、安全游标、已读条数、批次范围和完成批次数。</p></section><section class="step"><h3>新分片逐表状态</h3><p>每个物理分片各有独立进度。按 key 批量查询不推进全表扫描游标。表扫描结束不代表候选已处理完。</p></section><section class="step"><h3>Memory 逐条状态</h3><p>key、两端数据及存在性、扫描/查询来源、目标分片、当前批次、初比结果、复核与修复状态。记录状态细，表状态保持简单。</p></section></div>
+<h2>02 / 批次流水线：攒起来，再访问 DB</h2><div class="path">批量扫描老表 → Memory 攒批 → 按分片归组批量查询新表 → 内存初比<br>疑似差异排队攒复核批次 → 业务事务内批量重读两端 → 重新分类<br>待插入批 / 待逐条更新记录 / 仅报警 → 批量插入或逐条更新 → 提交成功 → 释放缓存、推进安全进度<br>再逐分片批量扫描新表 → 批量查询老表 → 额外记录进入同一复核流水线</div>
+<div class="branches"><section class="branch"><strong>扫描批</strong><p>一次读一页多条，避免每条 SELECT。每页有完整性和游标边界；可暂停以形成背压。</p></section><section class="branch"><strong>配对与复核批</strong><p>同目标分片的多个 key 合并查询。内存先排除相等记录；仅疑似差异参加批量事务复核。</p></section><section class="branch"><strong>写入批</strong><p>复核后按目标分片和操作种类归组，批量 INSERT / 逐条 UPDATE。更新每次只处理一个 key；具体 SQL 与事务由业务实现。</p></section></div>
+<p>不是一次批量调用就一定只有一条 SQL。适配器可依据参数、报文和锁预算拆成若干语句，批量读取和批量插入减少 DB 交互；不支持批量更新，每条待更新记录仍独立执行一次 UPDATE。同一事务内可顺序更新多条，但这不是一条批量更新 SQL。</p>
+<h2>03 / 记录状态与批次状态</h2><div class="path">记录：等待配对 → 等待初比 → 初比相等完成 / 等待复核攒批<br>复核批就绪 → 事务内批量重读 → 等待批量插入 / 等待逐条更新 / 只报警 / 相等跳过<br>写入中 → 等待提交 → 提交完成 → 可回收</div><p>批次独立维护：攒批中 → 就绪 → 批量读取中 → 比较中 → 事务复核中 → 分类写入中 → 提交中 → 排空。失败时记录失败阶段，不能把 SQL 执行成功当作提交成功。</p>
+<p class="note"><strong>事务边界：</strong>“等待复核攒批”在事务外完成，不提前持锁。事务开始后批量重读、重新分类、插入或更新并提交；“等待插入/更新”是事务内部短暂状态，不能释放锁后长时间排队。跨事务执行须重新复核或使用版本条件写入并处理冲突。</p>
+<p>两端存在性分别为 UNKNOWN（没加载）、PRESENT（读到）、ABSENT（完整查询确认不存在）。不能把尚未扫到、部分返回或超时当不存在。只在新表存在的记录始终保留并报警，不删除。</p>
+<h2>04 / 单步演示：两条修复、一条额外记录</h2><p>为便于查看，仅列 3 个示例新分片，实际数量由配置决定。42、43 路由到分片 1；44 位于分片 2。路由只是演示配置，不代表按 ID 取模。</p><div class="controls"><button id="prev">上一步</button><button id="next">下一步</button><button id="reset">重置</button><span id="position" aria-live="polite"></span></div><p class="note" id="event" aria-live="polite"></p>
+<div class="split"><section><h3>老表 · 1 张</h3><div class="table-scroll"><table><thead><tr><th>表名</th><th>状态</th><th>读取 / 安全游标</th><th>已读条数</th><th>完成批次</th></tr></thead><tbody id="old-tables"></tbody></table></div></section><section><h3>新表 · 每个分片独立</h3><div class="table-scroll"><table><thead><tr><th>分片</th><th>状态</th><th>游标</th><th>已读条数</th></tr></thead><tbody id="new-tables"></tbody></table></div></section></div>
+<div class="metrics"><section class="metric">Memory 总条数<br><strong id="memory-total">0</strong> / 容量 10 条</section><section class="metric">各处理状态当前条数<div class="counts" id="memory-counts"></div></section></div><label>统计范围 <select id="filter"><option value="all">所有分片</option><option value="1">分片 1</option><option value="2">分片 2</option><option value="3">分片 3</option></select></label><div class="table-scroll"><table><thead><tr><th>唯一 ID</th><th>目标分片</th><th>老表加载</th><th>新表加载</th><th>当前处理状态</th><th>执行批次</th></tr></thead><tbody id="memory-records"></tbody></table></div><p id="batch-status" class="path"></p><p>各互斥状态计数之和始终等于当前驻留条数。释放后计数减少；累计修复量是另一类历史指标。加载来源是可重叠属性，不参与状态计数求和。</p>
+<h2>05 / 什么时候发批，什么时候停下来</h2><ul><li>扫描批、配对批、复核批、写入批可分别配置条数、字节上限、SQL 参数预算、最大等待时间及事务时间预算；不是所有阶段必须同样大小。</li><li>达到任一阈值就发批，扫描 EOF 时也发送尾批。满缓存则暂停扫描、优先排空现有记录。不能只等批满而无限等待；单个过大记录须明确报错或使用受限独立路径。</li><li>按目标分片归组；不逐 key 查询全部 100 张表。路由规则或批量路由查询由调用方注入。若无法可靠路由，必须另设计批量索引或全量配对策略，不静默猜测。</li><li>多分片批次可拆成多个受限事务。同一 key 的两端复核及相应写入必须使用业务提供的一致性边界；不能把多个事务误称为整批全局原子。</li><li>批量失败不能把未知结果当全部成功；回滚可重试的事务，提交结果不确定则重读并幂等确认。部分分片已提交的结果保留，重试不重复累计业务成功事件。</li></ul>
+<h2>06 / 完成与恢复</h2><p>老表读完、所有新分片读完、缓存与候选批次排空、没有未决提交或告警，才算本轮完成。安全检查点仅在对应已读范围内所有结果完成后推进，不能越过仍在其他分片排队的记录。</p><p>Memory 有界，不能保留整轮全部 key 做历史去重。反向扫描可能重复遇到同 key，允许重新配对并幂等处理。路由正确性、唯一键约束及错误落片检测策略必须明确。</p><p>只报警模式不执行写入；仅新表存在永远只报警。持续并发修改需要快照、高水位、版本检查、CDC 或重跑；本轮完成不等于完整不停机迁移方案。持久化检查点和崩溃恢复仍是后续实现。</p><footer>离线交互设计稿 · 未连接数据库 · 未改动 Go 行为</footer></main><script>const names=['等待配对','等待初比','等待复核攒批','复核批就绪','事务复核中','等待批量插入','等待逐条更新','写入中','等待提交','修复完成','报警完成','相等跳过','失败'];
+const steps=[
+ ['未开始','初始：无记录，扫描器尚未启动。','未创建'],
+ ['等待配对','一次扫描读入 42、43，两条记录进入 Memory。','扫描批 S1 / 已读 2 条'],
+ ['等待初比','按分片 1 一次批量查询两条 key；43 查无记录，42 内容不同。','配对批 P1 / 完整成功'],
+ ['等待复核攒批','内存比较筛出两条候选，先在事务外攒批。','复核批 R1 / 攒批中'],
+ ['复核批就绪','达到复核批阈值，准备启动业务事务。','复核批 R1 / 就绪'],
+ ['事务复核中','事务内批量重读老表及分片 1 中的两条 key。','复核批 R1 / 活动事务'],
+ ['已分类','重读后 42 仍需更新、43 仍需插入；在同一事务内按操作归组。','写入批 U1 / I1 / 活动事务'],
+ ['写入中','分别提交逐条更新与批量插入给业务适配器；插入按批执行，更新每次仅一条。','写入批 U1 / I1 / 执行中'],
+ ['等待提交','SQL 执行完成，还不能记为修复成功。','事务 T1 / 提交中'],
+ ['修复完成','事务提交成功，两条记录修复完成。','事务 T1 / 已提交'],
+ ['已释放','释放本批缓存，老表扫描结束，安全游标推进到 43。','扫描批 S1 / 排空'],
+ ['等待配对','反向批量扫描各新分片：分片 2 读到额外记录 44；分片 1 的匹配记录已同步批量处理并释放。','反向扫描批 S2 / 待配对'],
+ ['等待复核攒批','批量查老表确认 44 不存在，产生 Extra 候选；尾批即使不足阈值也发出。','复核批 R2 / 尾批'],
+ ['事务复核中','业务事务重新读取两端，确认仅新表存在。','复核批 R2 / 活动事务'],
+ ['报警完成','保留 44，确认报警完成；不执行删除。','复核批 R2 / 已完成'],
+ ['已释放','全部新分片扫描结束且批次排空；当前示例本轮完成。','所有批次 / 排空']
+];let index=0;
+function records(){if(index===0||index===10||index===15)return [];if(index>=11)return [{key:44,shard:2,old:index===11?'UNKNOWN':'ABSENT',new:'PRESENT / Scan',state:steps[index][0],batch:'S2 / R2'}];return [42,43].map(key=>({key,shard:1,old:'PRESENT / Scan',new:index===1?'UNKNOWN':key===42?'PRESENT / Lookup':'ABSENT',state:index===6?(key===42?'等待逐条更新':'等待批量插入'):steps[index][0],batch:'S1 / P1 / R1'}));}
+function render(){document.getElementById('position').textContent=(index+1)+' / '+steps.length;document.getElementById('prev').disabled=index===0;document.getElementById('next').disabled=index===steps.length-1;document.getElementById('event').textContent=steps[index][1];document.getElementById('batch-status').textContent=steps[index][2];
+const phase=index===0?'未开始':index===1?'扫描中':index<10?'缓存满暂停':'扫描结束';document.getElementById('old-tables').innerHTML='<tr><td>user_old</td><td>'+phase+'</td><td>'+(index===0?'起点 / 起点':index<10?'43 / 起点':'43 / 43')+'</td><td>'+(index===0?0:2)+'</td><td>'+(index<10?0:1)+'</td></tr>';
+document.getElementById('new-tables').innerHTML=[1,2,3].map(shard=>{const end=index>=15||(index>=11&&shard!==2);const active=index>=11&&shard===2;return '<tr><td>user_new_shard_'+shard+'</td><td>'+(end?'扫描结束':active?'缓存满暂停':'未开始')+'</td><td>'+(end?'EOF':active?'44':'起点')+'</td><td>'+(index<11?0:shard===1?2:shard===2?1:0)+'</td></tr>';}).join('');
+const filter=document.getElementById('filter').value||'all';const rows=records().filter(v=>filter==='all'||String(v.shard)===filter);document.getElementById('memory-total').textContent=String(rows.length);const counts=Object.fromEntries(names.map(n=>[n,0]));rows.forEach(v=>counts[v.state]++);document.getElementById('memory-counts').innerHTML=names.map(n=>'<span class="count">'+n+' '+counts[n]+'</span>').join('');document.getElementById('memory-records').innerHTML=rows.length?rows.map(v=>'<tr><td>'+v.key+'</td><td>'+v.shard+'</td><td>'+v.old+'</td><td>'+v.new+'</td><td>'+v.state+'</td><td>'+v.batch+'</td></tr>').join(''):'<tr><td colspan="6">当前范围内无驻留记录</td></tr>';}
+document.getElementById('prev').onclick=()=>{if(index>0)index--;render();};document.getElementById('next').onclick=()=>{if(index<steps.length-1)index++;render();};document.getElementById('reset').onclick=()=>{index=0;render();};document.getElementById('filter').onchange=render;render();</script></body></html>

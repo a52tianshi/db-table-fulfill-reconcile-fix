@@ -11,9 +11,18 @@
 - 仅新表存在：保留并报警，绝不删除。
 - `AlertOnly`：仅复核和报警；`Repair`：允许插入或覆盖。
 
-## 先看运行流程
+## 独立可视化入口
 
-离线打开 [guide.html](guide.html) 查看流程、分支和事务边界。GitHub 文件页只展示 HTML 源码，下载或克隆后用浏览器打开即可。
+- [扫描 50 条的批量演示](batch-scan-demo.html)：默认 5 个 shard 每片 10 条；支持 13 种情况，逐条查看 Memory、分片进度、批量事务和失败处理。
+- [单线程整体状态流转图](single-thread-state-flow.html)：明确一次只执行一个 DB 动作，展示分片循环、事务分支、回滚和安全游标；节点可点击定位演示步骤。
+
+两个页面均为自包含 HTML，可离线打开；它们是下一版设计模拟，不连接数据库，也不代表当前 Go 核心已实现相同调度。模型验证及重新生成方式见 [可视化维护说明](docs/visuals/README.md)。
+
+## 先看状态机与批量流程
+
+离线打开 [guide.html](guide.html)：下一版按“一张老表 → 多张同结构新分片”设计，用内存攒批减少 DB 交互。包含逐表进度、逐 key 状态、总量及各状态计数，以及批量复核、批量插入与逐条更新的 16 步演示。[Markdown 设计稿](docs/state-machine.md) 保留详细约定。
+
+**这是下一版设计，尚未在 Go MVP 中实现。** 当前代码仍是单表对、批量配对查询及逐候选业务复核。下面描述已实现流程。GitHub 展示 HTML 源码，克隆后用浏览器打开。
 
 ```mermaid
 flowchart TD
@@ -74,5 +83,5 @@ go vet ./...
 - [reconcile_test.go](reconcile_test.go)：8 项关键正确性测试。
 - [memory/store.go](memory/store.go)：内存数据源及事务示例。
 - [cmd/demo/main.go](cmd/demo/main.go)：可直接运行的示例。
-- [guide.html](guide.html)：以流程为主的自包含中文 HTML。
+- [guide.html](guide.html)：三列状态机设计及自包含交互演示。
 - [docs/interface-contracts.md](docs/interface-contracts.md)：保留的详细 Markdown 说明。
