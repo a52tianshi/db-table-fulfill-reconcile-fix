@@ -21,6 +21,8 @@ type Report struct {
 	Updated  int64 // rows overwritten in New by Update
 	Warned   int64 // findings notified without writing
 
+	Retries int64 // failed attempts that were retried (any step)
+
 	Duration time.Duration
 }
 
@@ -28,7 +30,7 @@ type Report struct {
 func (r Report) Consistent() bool { return r.Missing+r.Different+r.Extra == 0 }
 
 func (r Report) String() string {
-	return fmt.Sprintf("scanned old=%d new=%d suspected=%d stale=%d | missing=%d different=%d extra=%d | inserted=%d updated=%d warned=%d | %s",
+	return fmt.Sprintf("scanned old=%d new=%d suspected=%d stale=%d | missing=%d different=%d extra=%d | inserted=%d updated=%d warned=%d | retries=%d %s",
 		r.OldScanned, r.NewScanned, r.Suspected, r.Stale, r.Missing, r.Different, r.Extra,
-		r.Inserted, r.Updated, r.Warned, r.Duration.Round(time.Millisecond))
+		r.Inserted, r.Updated, r.Warned, r.Retries, r.Duration.Round(time.Millisecond))
 }

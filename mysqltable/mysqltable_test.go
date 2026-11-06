@@ -2,7 +2,9 @@ package mysqltable
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -61,29 +63,61 @@ func TestByTableSortedForLockOrder(t *testing.T) {
 	}
 }
 
-func TestNewPairValidates(t *testing.T) {
-	db := &sql.DB{} // never used: validation fails first or succeeds without I/O
-	old, nw := Single[key]("orders_old"), Mod("orders_new_%02d", 4, func(k key) int64 { return k.UserID })
-	if _, err := NewPair(db, testSchema(), old, nw, Options{}); err != nil {
-		t.Fatal(err)
-	}
-	bad := testSchema()
-	bad.KeyColumn = "id"
-	if _, err := NewPair(db, bad, old, nw, Options{}); err == nil {
-		t.Fatal("KeyColumn not in Columns must fail")
-	}
-	if _, err := NewPair(db, testSchema(), Single[key]("bad`name"), nw, Options{}); err == nil {
-		t.Fatal("backtick in table name must fail")
+func pairConfig() PairConfig[order, key] {
+	return PairConfig[order, key]{
+		DB:          &sql.DB{}, // never used: NewPair does no I/O
+		Schema:      testSchema(),
+		Old:         Single[key]("orders_old"),
+		New:         Mod("orders_new_%02d", 4, func(k key) int64 { return k.UserID }),
+		TxOptions:   &sql.TxOptions{Isolation: sql.LevelReadCommitted},
+		InChunk:     1000,
+		InsertChunk: 500,
+		IsDuplicate: IsDuplicateKey,
 	}
 }
 
-func TestDefaultErrorClassifiers(t *testing.T) {
-	var o Options
-	o.normalize()
-	if !o.IsRetryable(errors.New("Error 1213 (40001): Deadlock found")) || o.IsRetryable(errors.New("Error 1062")) {
-		t.Fatal("retryable")
+func TestNewPairValidates(t *testing.T) {
+	if _, err := NewPair(pairConfig()); err != nil {
+		t.Fatal(err)
 	}
-	if !o.IsDuplicate(errors.New("Error 1062 (23000): Duplicate entry")) || o.PageSize != 1000 {
-		t.Fatal("duplicate / defaults")
+	if _, err := NewPair(PairConfig[order, key]{}); err == nil {
+		t.Fatal("empty config must fail")
+	}
+	cases := map[string]func(*PairConfig[order, key]){
+		"key column":  func(c *PairConfig[order, key]) { c.Schema.KeyColumn = "id" },
+		"bad table":   func(c *PairConfig[order, key]) { c.Old = Single[key]("bad`name") },
+		"no tx opts":  func(c *PairConfig[order, key]) { c.TxOptions = nil },
+		"zero chunk":  func(c *PairConfig[order, key]) { c.InChunk = 0 },
+		"no dup func": func(c *PairConfig[order, key]) { c.IsDuplicate = nil },
+		"no scan":     func(c *PairConfig[order, key]) { c.Schema.Scan = nil },
+	}
+	for name, mutate := range cases {
+		c := pairConfig()
+		mutate(&c)
+		if _, err := NewPair(c); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestErrorClassifiers(t *testing.T) {
+	transient := []error{
+		errors.New("Error 1213 (40001): Deadlock found"),
+		errors.New("Error 1205 (HY000): Lock wait timeout exceeded"),
+		errors.New("invalid connection"),
+		fmt.Errorf("wrapped: %w", driver.ErrBadConn),
+	}
+	for _, err := range transient {
+		if !IsTransient(err) {
+			t.Errorf("should retry: %v", err)
+		}
+	}
+	for _, err := range []error{nil, errors.New("Error 1062 (23000): Duplicate entry"), errors.New("Error 1146: no table")} {
+		if IsTransient(err) {
+			t.Errorf("should not retry: %v", err)
+		}
+	}
+	if !IsDuplicateKey(errors.New("Error 1062 (23000): Duplicate entry")) || IsDuplicateKey(nil) {
+		t.Fatal("duplicate")
 	}
 }

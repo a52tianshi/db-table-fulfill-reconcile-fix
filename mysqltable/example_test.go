@@ -48,8 +48,15 @@ func Example() {
 	oldTables := mysqltable.Single[OrderKey]("orders_old")
 	newTables := mysqltable.Mod("orders_new_%02d", 100, func(k OrderKey) int64 { return k.UserID })
 
-	pair, err := mysqltable.NewPair(db, schema, oldTables, newTables, mysqltable.Options{
-		PageSize: 1000, // rows per scan query
+	pair, err := mysqltable.NewPair(mysqltable.PairConfig[Order, OrderKey]{
+		DB:          db,
+		Schema:      schema,
+		Old:         oldTables,
+		New:         newTables,
+		TxOptions:   &sql.TxOptions{Isolation: sql.LevelReadCommitted},
+		InChunk:     1000, // keys per IN (...) query
+		InsertChunk: 500,  // rows per multi-row INSERT
+		IsDuplicate: mysqltable.IsDuplicateKey,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -63,27 +70,31 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	// 4. Engine: what to do, how big the batches are.
-	engine, err := r.New(r.Config[Order, OrderKey]{
-		Old:      pair.Old(),
-		New:      pair.New(),
-		Key:      schema.Key,
-		Compare:  compare,
-		Repairer: pair.Repairer(),
-		Notifier: r.LogNotifier[Order, OrderKey]{W: os.Stderr},
-		Policy:   r.Policy{Missing: r.Fix, Different: r.Warn},
-		Insert:   r.InsertBatchLocked,
+	// 4. Run: every field is required; Run validates before touching data.
+	rep, err := r.Run(context.Background(), r.Config[Order, OrderKey]{
+		Old:        pair.Old(),
+		New:        pair.New(),
+		Key:        schema.Key,
+		Compare:    compare,
+		Policy:     r.Policy{Missing: r.Fix, Different: r.Warn},
+		Insert:     r.InsertBatchLocked,
+		ExtraCheck: r.CheckExtra,
+		Repairer:   pair.Repairer(),
+		Notifier:   r.LogNotifier[Order, OrderKey]{W: os.Stderr},
 
-		BatchSize:   1000,
-		TxBatchSize: 200,
-		MemoryLimit: 64 << 20,
-		RowSize:     func(o Order) int64 { return int64(64 + len(o.Remark)) },
+		ScanPageSize: 1000,     // rows per scan query
+		BatchSize:    1000,     // rows paired per lookup of the other side
+		TxBatchSize:  200,      // keys per recheck / insert transaction
+		MemoryLimit:  64 << 20, // bytes buffered (or reconcile.NoMemoryLimit)
+		RowSize:      func(o Order) int64 { return int64(64 + len(o.Remark)) },
+
+		Retry: r.Retry{ // every SQL step; exhausted -> Run returns the error
+			MaxAttempts: 5,
+			Backoff:     50 * time.Millisecond,
+			MaxBackoff:  2 * time.Second,
+			Retryable:   mysqltable.IsTransient,
+		},
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rep, err := engine.Run(context.Background())
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -15,6 +15,7 @@ BATCH=${BATCH:-1000}
 PAGE=${PAGE:-1000}           # keyset scan page for old and new tables
 DIST=${DIST:-skew}            # skew | uniform
 INSERT_MODE=${INSERT_MODE:-batch-snapshot}  # per-row | batch-locked | batch-snapshot
+FAIL_RATE=${FAIL_RATE:-0.02}  # injected transient failures per scan/lookup/tx call (exercises Retry)
 export E2E_MYSQL_DSN=${E2E_MYSQL_DSN:-"root@tcp(127.0.0.1:3306)/reconcile_e2e"}
 
 mkdir -p bin logs
@@ -33,7 +34,7 @@ kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
 tail -n 2 logs/writer.log
 
 step "3. 第一轮核对修复 (期望大量插入)"
-bin/e2e reconcile -label run1 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -expect-repairs
+bin/e2e reconcile -label run1 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" -expect-repairs
 
 # batch-snapshot may leave rows stale (updated between scan and insert); run2
 # must then overwrite them (different>0 allowed) but find nothing missing.
@@ -41,11 +42,11 @@ if [ "$INSERT_MODE" = batch-snapshot ]; then RUN2_EXPECT=-expect-no-missing; els
 step "4. 等待 ${GAP}s 后第二轮 ($RUN2_EXPECT, 写入仍在进行)"
 sleep "$GAP"
 kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
-bin/e2e reconcile -label run2 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" $RUN2_EXPECT
+bin/e2e reconcile -label run2 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" $RUN2_EXPECT
 
 step "4b. 第三轮 (必须 0 修复, 写入仍在进行: 证明已收敛)"
 kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
-bin/e2e reconcile -label run3 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -expect-clean
+bin/e2e reconcile -label run3 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAGE" -fail-rate "$FAIL_RATE" -expect-clean
 
 step "5. 停机: 停止所有写入"
 kill -TERM "$WRITER"

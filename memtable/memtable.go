@@ -84,25 +84,38 @@ type side[T any, K cmp.Ordered] struct {
 	old bool
 }
 
-// Scan snapshots the key set (O(N), fine for tests) and yields in key order.
-func (d side[T, K]) Scan(ctx context.Context, yield func(T) error) error {
+type cursor[K any] struct{ last K }
+
+// ScanPage returns up to limit rows with keys greater than the cursor, in
+// key order (sorts the key set per call: fine for tests, not for big data).
+func (d side[T, K]) ScanPage(ctx context.Context, c reconcile.Cursor, limit int) ([]T, reconcile.Cursor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	d.s.mu.Lock()
-	keys := sortedKeys(d.s.table(d.old))
-	d.s.mu.Unlock()
-	for _, k := range keys {
-		if err := ctx.Err(); err != nil {
-			return err
+	defer d.s.mu.Unlock()
+	m := d.s.table(d.old)
+	keys := sortedKeys(m)
+	i := 0
+	if c != nil {
+		cur, ok := c.(cursor[K])
+		if !ok {
+			return nil, nil, fmt.Errorf("memtable: foreign cursor %T", c)
 		}
-		d.s.mu.Lock()
-		v, ok := d.s.table(d.old)[k]
-		d.s.mu.Unlock()
-		if ok {
-			if err := yield(v); err != nil {
-				return err
-			}
+		i, _ = slices.BinarySearch(keys, cur.last)
+		for i < len(keys) && keys[i] <= cur.last {
+			i++
 		}
 	}
-	return nil
+	end := min(i+limit, len(keys))
+	rows := make([]T, 0, end-i)
+	for _, k := range keys[i:end] {
+		rows = append(rows, m[k])
+	}
+	if end == len(keys) {
+		return rows, nil, nil
+	}
+	return rows, cursor[K]{keys[end-1]}, nil
 }
 
 func (d side[T, K]) Lookup(ctx context.Context, keys []K) (map[K]T, error) {

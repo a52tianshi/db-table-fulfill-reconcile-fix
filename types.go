@@ -5,13 +5,20 @@ import (
 	"errors"
 )
 
+// Cursor is an opaque scan position owned by a Source. nil means "start"
+// when passed in, and "no more pages" when returned.
+type Cursor any
+
 // Source is one logical side of the comparison: the old table, or the new
 // table (a sharded new table is still ONE Source covering every shard).
+// Implementations make ONE attempt per call; the engine retries.
 type Source[T any, K comparable] interface {
-	// Scan calls yield synchronously once per row, each key exactly once.
-	// It returns nil only after a complete traversal and must return yield's
-	// error unchanged. Page size / snapshot bounds are the implementation's job.
-	Scan(ctx context.Context, yield func(T) error) error
+	// ScanPage returns up to limit rows after cursor, and the cursor of the
+	// next page (nil when the scan is complete). A page may be empty while
+	// next is non-nil (e.g. an empty shard). Calling it again with the same
+	// cursor must return the same position (retries rely on it). Across the
+	// whole scan, every key appears exactly once.
+	ScanPage(ctx context.Context, cursor Cursor, limit int) (rows []T, next Cursor, err error)
 
 	// Lookup returns every requested key that exists. A key missing from the
 	// map means "confirmed absent"; a partial or failed query MUST return an
@@ -21,8 +28,10 @@ type Source[T any, K comparable] interface {
 
 // Repairer owns the transaction boundary used to recheck and fix candidates.
 type Repairer[T any, K comparable] interface {
-	// InTx runs fn in one transaction and commits when fn returns nil. It may
-	// re-run fn after a transient failure (deadlock); fn is safe to re-run.
+	// InTx runs fn in one transaction and commits when fn returns nil; any
+	// error rolls back. ONE attempt: the engine re-runs the whole InTx on
+	// retryable errors. fn rereads under lock, so re-running is safe even
+	// when a commit's outcome was unknown.
 	InTx(ctx context.Context, fn func(Tx[T, K]) error) error
 }
 
@@ -45,7 +54,7 @@ type Grouper[K comparable] interface {
 }
 
 // ErrConflict marks a write that lost a race (e.g. duplicate key on insert).
-// The engine rereads the affected keys and decides again.
+// It is never retried as-is: the engine rereads the keys and decides again.
 var ErrConflict = errors.New("reconcile: write conflict")
 
 // Comparator decides whether an old row and its new copy are consistent.
@@ -64,19 +73,23 @@ const (
 	Extra     Kind = "extra"     // only in new; never deleted, only warned
 )
 
-// Action is what to do with a confirmed inconsistency.
+// Action is what to do with a confirmed inconsistency. The zero value is
+// invalid: every action must be chosen explicitly.
 type Action uint8
 
 const (
-	Warn Action = iota // notify only, never write (zero value: safe default)
-	Fix                // write old-side content into the new side
+	Warn Action = iota + 1 // notify only, never write
+	Fix                    // write old-side content into the new side
 )
 
 func (a Action) String() string {
-	if a == Fix {
+	switch a {
+	case Warn:
+		return "warn"
+	case Fix:
 		return "fix"
 	}
-	return "warn"
+	return "unset"
 }
 
 // Policy chooses Warn or Fix per kind. Extra rows are always warned.
@@ -85,13 +98,14 @@ type Policy struct {
 	Different Action
 }
 
-// InsertMode decides how missing rows are inserted when Policy.Missing is Fix.
+// InsertMode decides how missing rows are inserted when Policy.Missing is
+// Fix. The zero value is invalid.
 type InsertMode uint8
 
 const (
-	// InsertBatchLocked (default): per transaction, Lock-reread up to
-	// TxBatchSize keys, then one multi-row Insert of the fresh old rows.
-	InsertBatchLocked InsertMode = iota
+	// InsertBatchLocked: per transaction, Lock-reread up to TxBatchSize keys,
+	// then one multi-row Insert of the fresh old rows.
+	InsertBatchLocked InsertMode = iota + 1
 	// InsertPerRow: one transaction per missing key. Slowest.
 	InsertPerRow
 	// InsertBatchSnapshot: multi-row Insert of the rows as scanned, no reread.
@@ -104,14 +118,28 @@ const (
 
 func (m InsertMode) String() string {
 	switch m {
+	case InsertBatchLocked:
+		return "batch-locked"
 	case InsertPerRow:
 		return "per-row"
 	case InsertBatchSnapshot:
 		return "batch-snapshot"
-	default:
-		return "batch-locked"
 	}
+	return "unset"
 }
+
+// ExtraCheck decides whether the reverse pass (scan New, look up Old) runs
+// to find rows that exist only in New. The zero value is invalid.
+type ExtraCheck uint8
+
+const (
+	CheckExtra ExtraCheck = iota + 1
+	SkipExtra
+)
+
+// NoMemoryLimit disables the byte limit (rows are still bounded by
+// BatchSize). Config.MemoryLimit must be this or a positive byte count.
+const NoMemoryLimit int64 = -1
 
 // Finding is one confirmed inconsistency, delivered after its transaction
 // committed. Old/New are the rows as reread (nil when absent); for
@@ -125,8 +153,8 @@ type Finding[T any, K comparable] struct {
 	Fixed  bool     // true when the new side was written
 }
 
-// Notifier receives every confirmed Finding (warned and fixed). An error
-// stops the Run; the transaction is already committed.
+// Notifier receives every confirmed Finding (warned and fixed). It is
+// retried like any other step; exhausting retries stops the Run.
 type Notifier[T any, K comparable] interface {
 	Notify(ctx context.Context, f Finding[T, K]) error
 }

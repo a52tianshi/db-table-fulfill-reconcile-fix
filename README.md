@@ -30,20 +30,22 @@ flowchart LR
 
 ## 2. 接入 MySQL：需要填写什么
 
+入口只有一个：`reconcile.Run(ctx, cfg)`。**所有参数都必须填写，没有默认值。** `Run` 在访问任何数据之前先检查整个配置，有问题会一次列出全部，然后直接返回错误。`mysqltable.NewPair(cfg)` 也按同样的规则检查。
+
 完整可编译的示例见 [`mysqltable/example_test.go`](mysqltable/example_test.go)。共四步：
 
-### ① Schema：列和结构体的映射（必填）
+### ① Schema：列和结构体的映射
 
 | 字段 | 说明 |
 |---|---|
 | `Columns` | 参与比对和复制的所有列，顺序与 `Values` / `Scan` 一致，必须包含 `KeyColumn` |
 | `KeyColumn` | 单列主键（如 `order_id`），用于 keyset 分页、`IN` 查询、`UPDATE … WHERE` |
 | `Key func(T) K` | 行的唯一标识。如果分表依赖其他字段，把它们也放进 K，如 `{OrderID, UserID}`。这些字段必须不可变 |
-| `KeyValue func(K) any` | 由 K 取出 `KeyColumn` 的值 |
+| `KeyValue func(K) any` | 由 K 取出 `KeyColumn` 的值，必须带类型（int64、string 等），不能是 `[]byte` |
 | `Values func(T) []any` | 按 `Columns` 顺序返回列值（INSERT / UPDATE 使用） |
 | `Scan func(scan) (T, error)` | 按 `Columns` 顺序把一行读进 T |
 
-### ② Router：分表规则（必填，老表和新表各一个）
+### ② Router：分表规则（老表和新表各一个）
 
 | 构造函数 | 用途 |
 |---|---|
@@ -52,33 +54,52 @@ flowchart LR
 | `mysqltable.RouterFunc(tables, route)` | 自定义：给出全部表名和路由函数 |
 | 实现 `Router[K]` 接口 | `Tables() []string` 和 `Route(K) string` |
 
-### ③ Options：适配器参数（都可不填）
+### ③ mysqltable.PairConfig
 
-| 字段 | 默认值 | 说明 |
+| 字段 | 示例值 | 说明 |
 |---|---|---|
-| `PageSize` | 1000 | 每条扫描 SQL 读多少行，也是每条 `IN` 查询的最大 key 数 |
+| `DB` | `*sql.DB` | 老表和所有新表都在这一个 MySQL 实例上 |
+| `Schema` | 见 ① | |
+| `Old` / `New` | 见 ② | |
+| `TxOptions` | `&sql.TxOptions{Isolation: sql.LevelReadCommitted}` | 修复事务的隔离级别，推荐 READ COMMITTED（锁定读能读到最新版本，且不加间隙锁） |
+| `InChunk` | 1000 | 一条 `IN (...)` 查询最多带多少个 key |
 | `InsertChunk` | 500 | 一条多行 INSERT 最多插多少行 |
-| `TxOptions` | READ COMMITTED | 修复事务的隔离级别（避免间隙锁） |
-| `MaxRetries` | 10 | 遇到死锁或锁等待超时时，事务的重试次数 |
-| `IsRetryable` / `IsDuplicate` | 按 MySQL 错误码 1213、1205 / 1062 匹配 | 按 go-sql-driver 的错误信息格式判断，换驱动时请传入自己的判断函数 |
+| `IsDuplicate` | `mysqltable.IsDuplicateKey` | 判断主键冲突（MySQL 错误码 1062） |
 
-### ④ Config：引擎参数
+### ④ reconcile.Config
 
-| 字段 | 必填 | 默认值 | 说明 |
-|---|---|---|---|
-| `Old`, `New` | ✓ | | `pair.Old()`, `pair.New()` |
-| `Key` | ✓ | | 一般直接用 `schema.Key` |
-| `Compare` | ✓ | | 比对规则，见第 3 节 |
-| `Repairer` | ✓ | | `pair.Repairer()` |
-| `Policy` | | 全部 Warn | 每类差异选告警（`Warn`）还是修复（`Fix`），见第 4 节 |
-| `Insert` | | `InsertBatchLocked` | 缺失行的插入方式，见第 4 节 |
-| `Notifier` | | 告警输出到 stderr | 每条确认的差异都会在事务提交后回调（包括已修复的） |
-| `BatchSize` | | 1000 | 攒多少行做一次新表批量查询 |
-| `TxBatchSize` | | 200 | 一个复核或插入事务最多处理多少个 key。mysqltable 还保证一个事务只涉及一张新分表 |
-| `MemoryLimit` + `RowSize` | | 0（不限） | 按字节限制内存。缓存的行达到上限会提前处理当前批，需要提供 `RowSize` 估算每行大小 |
-| `SkipExtraCheck` | | false | 跳过反向扫描（不检查仅新表存在的行，可以省一次新表全量扫描） |
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `Old`, `New` | `pair.Old()`, `pair.New()` | |
+| `Key` | `schema.Key` | |
+| `Compare` | 见第 3 节 | 比对规则 |
+| `Policy` | `{Missing: Warn/Fix, Different: Warn/Fix}` | 每类差异选告警还是修复，见第 4 节 |
+| `Insert` | `InsertBatchLocked` / `InsertBatchSnapshot` / `InsertPerRow` | 缺失行的插入方式，见第 4 节。只告警时也必须填 |
+| `ExtraCheck` | `CheckExtra` / `SkipExtra` | 是否反向扫描新表，找出只在新表存在的行 |
+| `Repairer` | `pair.Repairer()` | |
+| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 每条确认的差异都会在事务提交后回调（包括已修复的） |
+| `ScanPageSize` | 1000 | 每条扫描 SQL 读多少行 |
+| `BatchSize` | 1000 | 攒多少行做一次另一侧的批量查询 |
+| `TxBatchSize` | 200 | 一个复核或插入事务最多处理多少个 key。mysqltable 还保证一个事务只涉及一张新分表 |
+| `MemoryLimit` | 字节数，或 `r.NoMemoryLimit` | 缓存的行达到这个大小就提前处理当前批。行数上限是 `BatchSize + ScanPageSize` |
+| `RowSize` | `func(T) int64` | 估算每行字节数。`MemoryLimit > 0` 时必填，`NoMemoryLimit` 时必须为 nil |
+| `Retry` | 见下表 | 重试策略 |
 
-`engine.Run(ctx)` 返回 `Report`，各字段见第 6 节。
+### ⑤ Retry：每一步都会重试，超过次数整个 Run 退出
+
+扫描每一页、每次批量查询、每个复核或插入事务、每次 Notifier 回调，都是独立的一步，各自按 `Retry` 重试：
+
+| 字段 | 示例值 | 说明 |
+|---|---|---|
+| `MaxAttempts` | 5 | 每一步最多尝试几次（1 = 不重试） |
+| `Backoff` | 50ms | 第一次重试前等多久，之后每次翻倍 |
+| `MaxBackoff` | 2s | 等待时间上限 |
+| `Retryable` | `mysqltable.IsTransient` | 哪些错误值得重试。`IsTransient` 覆盖死锁、锁等待超时、连接断开等；也可以传 `func(error) bool { return true }`，表示全部重试 |
+
+- 某一步超过 `MaxAttempts` 仍然失败，`Run` 立即返回 `scan old page 3: giving up after 5 attempts: <最后一次的错误>`。已提交的事务不回滚，修好问题后重跑即可（幂等）。
+- context 取消、`ErrConflict`、引擎自身的不变量错误（例如重复 key）不会重试。
+- 事务整体重跑：事务内是先加锁重读、再写入，所以即使上次提交结果未知，重跑也是安全的。
+- `Report.Retries` 记录了总共重试的次数。
 
 ## 3. 比对规则：允许部分字段不一致
 
@@ -107,7 +128,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 
 | `Insert` | 做法 | 速度（e2e 5 万行） | 注意 |
 |---|---|---|---|
-| `InsertBatchLocked`（默认） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.0s | 一次就写对 |
+| `InsertBatchLocked`（推荐） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.0s | 一次就写对 |
 | `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.0s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正（需 `Different = Fix`）。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
 | `InsertPerRow` | 每个 key 一个事务 | 64s | 最慢，用于排查 |
 
@@ -128,15 +149,16 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 | `Stale` | 疑似差异中，加锁重读后发现已经一致的数量（线上并发写入导致，属正常） |
 | `Missing` / `Different` / `Extra` | 重读后确认的差异数 |
 | `Inserted` / `Updated` / `Warned` | 实际插入、覆盖、仅告警的行数 |
+| `Retries` | 所有步骤累计重试的次数 |
 | `Consistent()` | 本轮没有确认任何差异 |
 
 ## 7. 不用 MySQL：自己实现接口
 
-实现下面三个接口即可，具体约定见源码注释（[`types.go`](types.go)）。内存版参考实现见 [`memtable`](memtable/memtable.go)。
+实现下面三个接口即可，具体约定见源码注释（[`types.go`](types.go)）。内存版参考实现见 [`memtable`](memtable/memtable.go)。**每个方法只需尝试一次，重试由引擎统一负责。**
 
 | 接口 | 方法 | 要求 |
 |---|---|---|
-| `Source[T,K]` | `Scan(ctx, yield)` | 每个 key 恰好产出一次，同步调用 yield，完整遍历才返回 nil |
+| `Source[T,K]` | `ScanPage(ctx, cursor, limit)` | 返回 cursor 之后的至多 limit 行，以及下一页的 cursor（nil 表示扫完）。用同一个 cursor 重复调用必须得到同一页的位置；整个扫描中每个 key 恰好出现一次 |
 | | `Lookup(ctx, keys)` | 返回存在的行；map 里没有的 key 就表示确认不存在；部分失败必须返回 error |
 | `Repairer[T,K]` | `InTx(ctx, fn)` | fn 返回 nil 才提交；可以重试 fn |
 | `Tx[T,K]` | `Lock(ctx, keys)` | 加锁重读两边，先老后新 |
@@ -147,14 +169,14 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 ## 8. 并发与失败
 
 - 引擎串行执行，没有后台 goroutine。一批处理完才读下一批，形成天然背压。
-- 任何错误都会立即停止 `Run`，已提交的事务不回滚。重跑是幂等的。
+- 每一步失败先按 `Retry` 重试；重试次数用完，或遇到不可重试的错误，`Run` 立即停止。已提交的事务不回滚，重跑是幂等的。
 - 扫描失败时，不会处理未满的尾批。
 - 每张表扫描开始时会记下当前最大主键作为扫描上限，之后新插入的行留给双写保证。持续写入下，单轮不保证全局一致，需要多轮收敛（见第 5 节）。
 
 ## 9. 目录结构与测试
 
 ```
-.                  核心：types.go 接口 / config.go 参数 / engine.go 引擎 / compare.go 比对 / notify.go / report.go
+.                  核心：types.go 接口 / config.go 参数与校验 / engine.go 引擎 / retry.go 重试 / compare.go 比对 / notify.go / report.go
 ├── mysqltable/    MySQL 实现：Router 分表规则、Schema、Pair（Source + Repairer）
 ├── memtable/      内存实现（单测、示例用）
 ├── e2e/           独立模块：真实 MySQL 端到端测试（1 老表 + 100 分表 + 持续双写）
@@ -163,7 +185,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 
 ```sh
 go test -race ./...      # 单测：engine_test / compare_test / memtable / mysqltable（不需要数据库）
-cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL，详见 e2e/README.md
+cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% 的 SQL 调用注入失败，验证重试。详见 e2e/README.md
 ```
 
 ## 设计文档

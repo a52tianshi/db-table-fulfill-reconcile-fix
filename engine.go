@@ -8,33 +8,25 @@ import (
 	"time"
 )
 
-// Engine runs old-authoritative reconciliation. It is stateless between
-// runs; each Run is a full serial pass, memory bounded by BatchSize rows.
-type Engine[T any, K comparable] struct {
-	cfg     Config[T, K]
-	grouper Grouper[K]
-}
-
-// New validates cfg and fills defaults.
-func New[T any, K comparable](cfg Config[T, K]) (*Engine[T, K], error) {
-	if err := cfg.normalize(); err != nil {
-		return nil, fmt.Errorf("reconcile: invalid config: %w", err)
+// Run validates cfg, then does one forward pass (scan Old, look up New:
+// missing / different) and, with CheckExtra, one reverse pass (scan New,
+// look up Old: extra). Every external call is retried per cfg.Retry; when a
+// step exhausts its attempts, or any non-retryable error occurs, Run stops
+// and returns it. Transactions already committed stay committed.
+//
+// Run keeps no state between calls and is safe to call repeatedly.
+func Run[T any, K comparable](ctx context.Context, cfg Config[T, K]) (rep Report, err error) {
+	if err := cfg.validate(); err != nil {
+		return rep, err
 	}
-	g, _ := cfg.Repairer.(Grouper[K])
-	return &Engine[T, K]{cfg: cfg, grouper: g}, nil
-}
-
-// Run does one forward pass (scan Old, look up New: missing / different) and,
-// unless SkipExtraCheck, one reverse pass (scan New, look up Old: extra).
-// Any error stops immediately; transactions already committed stay committed.
-func (e *Engine[T, K]) Run(ctx context.Context) (rep Report, err error) {
 	start := time.Now()
 	defer func() { rep.Duration = time.Since(start) }()
-	r := &run[T, K]{Engine: e, ctx: ctx, rep: &rep}
+	r := &run[T, K]{cfg: cfg, ctx: ctx, rep: &rep}
+	r.grouper, _ = cfg.Repairer.(Grouper[K])
 	if err = r.pass(false); err != nil {
 		return rep, err
 	}
-	if !e.cfg.SkipExtraCheck {
+	if cfg.ExtraCheck == CheckExtra {
 		if err = r.pass(true); err != nil {
 			return rep, err
 		}
@@ -43,9 +35,10 @@ func (e *Engine[T, K]) Run(ctx context.Context) (rep Report, err error) {
 }
 
 type run[T any, K comparable] struct {
-	*Engine[T, K]
-	ctx context.Context
-	rep *Report
+	cfg     Config[T, K]
+	grouper Grouper[K]
+	ctx     context.Context
+	rep     *Report
 }
 
 // buffer holds one batch of scanned rows; it never evicts.
@@ -79,46 +72,62 @@ func (r *run[T, K]) pass(reverse bool) error {
 		b.reset()
 		return nil
 	}
-	err := src.Scan(r.ctx, func(v T) error {
+	var cursor Cursor
+	for page := 1; ; page++ {
 		if err := r.ctx.Err(); err != nil {
 			return err
 		}
-		var size int64
-		if cfg.MemoryLimit > 0 {
-			size = cfg.RowSize(v)
-			if len(b.keys) > 0 && b.bytes+size > cfg.MemoryLimit {
+		var rows []T
+		var next Cursor
+		err := r.do(fmt.Sprintf("scan %s page %d", side, page), func() (err error) {
+			rows, next, err = src.ScanPage(r.ctx, cursor, cfg.ScanPageSize)
+			return err
+		})
+		if err != nil {
+			return err // the unfinished tail batch is never judged
+		}
+		if len(rows) > cfg.ScanPageSize {
+			return fmt.Errorf("scan %s page %d: %d rows exceed ScanPageSize %d", side, page, len(rows), cfg.ScanPageSize)
+		}
+		for _, v := range rows {
+			var size int64
+			if cfg.MemoryLimit > 0 {
+				size = cfg.RowSize(v)
+				if len(b.keys) > 0 && b.bytes+size > cfg.MemoryLimit {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+			}
+			k := cfg.Key(v)
+			if _, dup := b.seen[k]; dup {
+				return fmt.Errorf("scan %s: duplicate key %v in one batch: ScanPage must emit each key once", side, k)
+			}
+			b.seen[k] = struct{}{}
+			b.rows, b.keys, b.bytes = append(b.rows, v), append(b.keys, k), b.bytes+size
+			*counter++
+			if len(b.keys) >= cfg.BatchSize {
 				if err := flush(); err != nil {
 					return err
 				}
 			}
 		}
-		k := cfg.Key(v)
-		if _, dup := b.seen[k]; dup {
-			return fmt.Errorf("duplicate key %v in one batch: Scan must emit each key once", k)
-		}
-		b.seen[k] = struct{}{}
-		b.rows, b.keys, b.bytes = append(b.rows, v), append(b.keys, k), b.bytes+size
-		*counter++
-		if len(b.keys) >= cfg.BatchSize {
+		if next == nil {
 			return flush()
 		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("scan %s: %w", side, err)
+		cursor = next
 	}
-	// The tail batch is only processed after a fully successful scan.
-	return flush()
 }
 
 // flush pairs one batch with a complete Lookup and handles candidates.
 func (r *run[T, K]) flush(dst Source[T, K], b *buffer[T, K], reverse bool) error {
-	if err := r.ctx.Err(); err != nil {
+	var found map[K]T
+	err := r.do(fmt.Sprintf("lookup %d keys", len(b.keys)), func() (err error) {
+		found, err = dst.Lookup(r.ctx, b.keys)
 		return err
-	}
-	found, err := dst.Lookup(r.ctx, b.keys)
+	})
 	if err != nil {
-		return fmt.Errorf("lookup: %w", err)
+		return err
 	}
 	for k, v := range found {
 		if _, ok := b.seen[k]; !ok || r.cfg.Key(v) != k {
@@ -195,7 +204,7 @@ func (r *run[T, K]) chunks(keys []K) [][]int {
 	return out
 }
 
-const maxConflictRetries = 3
+const maxConflictRounds = 3
 
 // recheck rereads keys under lock, classifies them from the fresh state and
 // applies Policy, one transaction per chunk.
@@ -206,14 +215,14 @@ func (r *run[T, K]) recheck(keys []K) error {
 			chunk[j] = keys[i]
 		}
 		var err error
-		for attempt := 0; ; attempt++ {
+		for round := 0; ; round++ {
 			err = r.recheckTx(chunk)
-			if !errors.Is(err, ErrConflict) || attempt >= maxConflictRetries {
+			if !errors.Is(err, ErrConflict) || round >= maxConflictRounds {
 				break
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("recheck %d keys: %w", len(chunk), err)
+			return err
 		}
 	}
 	return nil
@@ -223,57 +232,59 @@ func (r *run[T, K]) recheckTx(keys []K) error {
 	cfg := &r.cfg
 	var findings []Finding[T, K]
 	var stale int64
-	err := cfg.Repairer.InTx(r.ctx, func(tx Tx[T, K]) error {
-		findings, stale = findings[:0], 0 // fn may be re-run
-		old, cur, err := tx.Lock(r.ctx, keys)
-		if err != nil {
-			return err
-		}
-		if err := r.checkKeys(keys, old, cur); err != nil {
-			return err
-		}
-		var inserts []T
-		for _, k := range keys {
-			o, hasOld := old[k]
-			n, hasNew := cur[k]
-			f := Finding[T, K]{Key: k}
-			if hasOld {
-				f.Old = &o
+	err := r.do(fmt.Sprintf("recheck tx (%d keys)", len(keys)), func() error {
+		return cfg.Repairer.InTx(r.ctx, func(tx Tx[T, K]) error {
+			findings, stale = findings[:0], 0 // the transaction may be re-run
+			old, cur, err := tx.Lock(r.ctx, keys)
+			if err != nil {
+				return err
 			}
-			if hasNew {
-				f.New = &n
+			if err := r.checkKeys(keys, old, cur); err != nil {
+				return permanent{err}
 			}
-			switch {
-			case !hasOld && !hasNew:
-				stale++
-				continue
-			case !hasOld:
-				f.Kind = Extra
-			case !hasNew:
-				f.Kind = Missing
-				if cfg.Policy.Missing == Fix {
-					inserts = append(inserts, o)
-					f.Fixed = true
+			var inserts []T
+			for _, k := range keys {
+				o, hasOld := old[k]
+				n, hasNew := cur[k]
+				f := Finding[T, K]{Key: k}
+				if hasOld {
+					f.Old = &o
 				}
-			default:
-				if f.Fields = cfg.Compare.Diff(o, n); len(f.Fields) == 0 {
+				if hasNew {
+					f.New = &n
+				}
+				switch {
+				case !hasOld && !hasNew:
 					stale++
 					continue
-				}
-				f.Kind = Different
-				if cfg.Policy.Different == Fix {
-					if err := tx.Update(r.ctx, o); err != nil {
-						return err
+				case !hasOld:
+					f.Kind = Extra
+				case !hasNew:
+					f.Kind = Missing
+					if cfg.Policy.Missing == Fix {
+						inserts = append(inserts, o)
+						f.Fixed = true
 					}
-					f.Fixed = true
+				default:
+					if f.Fields = cfg.Compare.Diff(o, n); len(f.Fields) == 0 {
+						stale++
+						continue
+					}
+					f.Kind = Different
+					if cfg.Policy.Different == Fix {
+						if err := tx.Update(r.ctx, o); err != nil {
+							return err
+						}
+						f.Fixed = true
+					}
 				}
+				findings = append(findings, f)
 			}
-			findings = append(findings, f)
-		}
-		if len(inserts) > 0 {
-			return tx.Insert(r.ctx, inserts)
-		}
-		return nil
+			if len(inserts) > 0 {
+				return tx.Insert(r.ctx, inserts)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return err
@@ -297,8 +308,8 @@ func (r *run[T, K]) checkKeys(keys []K, maps ...map[K]T) error {
 	return nil
 }
 
-// snapshotInsert writes scanned rows without reread; conflicts fall back to
-// a locked recheck of that chunk.
+// snapshotInsert writes scanned rows without reread; a conflict falls back
+// to a locked recheck of that chunk.
 func (r *run[T, K]) snapshotInsert(rows []T) error {
 	keys := make([]K, len(rows))
 	for i, v := range rows {
@@ -310,7 +321,9 @@ func (r *run[T, K]) snapshotInsert(rows []T) error {
 		for j, i := range idx {
 			chunk[j], ck[j] = rows[i], keys[i]
 		}
-		err := r.cfg.Repairer.InTx(r.ctx, func(tx Tx[T, K]) error { return tx.Insert(r.ctx, chunk) })
+		err := r.do(fmt.Sprintf("snapshot insert tx (%d rows)", len(chunk)), func() error {
+			return r.cfg.Repairer.InTx(r.ctx, func(tx Tx[T, K]) error { return tx.Insert(r.ctx, chunk) })
+		})
 		if errors.Is(err, ErrConflict) {
 			if err := r.recheck(ck); err != nil {
 				return err
@@ -318,7 +331,7 @@ func (r *run[T, K]) snapshotInsert(rows []T) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("snapshot insert %d rows: %w", len(chunk), err)
+			return err
 		}
 		fs := make([]Finding[T, K], len(chunk))
 		for j := range chunk {
@@ -350,8 +363,11 @@ func (r *run[T, K]) record(fs []Finding[T, K]) error {
 		default:
 			r.rep.Warned++
 		}
-		if err := r.cfg.Notifier.Notify(r.ctx, f); err != nil {
-			return fmt.Errorf("notify %v: %w", f.Key, err)
+		err := r.do(fmt.Sprintf("notify %s %v", f.Kind, f.Key), func() error {
+			return r.cfg.Notifier.Notify(r.ctx, f)
+		})
+		if err != nil {
+			return err
 		}
 	}
 	return nil

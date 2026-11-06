@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	r "github.com/a52tianshi/db-table-fulfill-reconcile-fix"
 	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/memtable"
@@ -23,19 +24,28 @@ func Example() {
 	if err != nil {
 		panic(err)
 	}
-	engine, err := r.New(r.Config[Order, int]{
-		Old:      store.Old(),
-		New:      store.New(),
-		Key:      func(o Order) int { return o.ID },
-		Compare:  compare,
-		Repairer: store,
-		Notifier: r.LogNotifier[Order, int]{W: os.Stdout},
-		Policy:   r.Policy{Missing: r.Fix, Different: r.Fix},
+	rep, err := r.Run(context.Background(), r.Config[Order, int]{
+		Old:        store.Old(),
+		New:        store.New(),
+		Key:        func(o Order) int { return o.ID },
+		Compare:    compare,
+		Policy:     r.Policy{Missing: r.Fix, Different: r.Fix},
+		Insert:     r.InsertBatchLocked,
+		ExtraCheck: r.CheckExtra,
+		Repairer:   store,
+		Notifier:   r.LogNotifier[Order, int]{W: os.Stdout},
+
+		ScanPageSize: 1000,
+		BatchSize:    1000,
+		TxBatchSize:  200,
+		MemoryLimit:  r.NoMemoryLimit,
+		Retry: r.Retry{
+			MaxAttempts: 5,
+			Backoff:     10 * time.Millisecond,
+			MaxBackoff:  time.Second,
+			Retryable:   func(error) bool { return true },
+		},
 	})
-	if err != nil {
-		panic(err)
-	}
-	rep, err := engine.Run(context.Background())
 	if err != nil {
 		panic(err)
 	}
