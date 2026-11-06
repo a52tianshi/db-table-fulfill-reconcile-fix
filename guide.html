@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>表数据核对与修复 · 运行流程</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#173347;background:#f0f4f7;line-height:1.75}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:36px 24px 70px}header{background:#12354b;color:#fff;padding:38px;border-radius:18px}h1{font-size:36px;line-height:1.3;margin:12px 0}h2{margin-top:44px}small{letter-spacing:2px;color:#8ee3cf}.subtitle{color:#c4dbe7}.steps{display:grid;grid-template-columns:1fr 1fr;gap:20px}.step{background:#fff;border:1px solid #d7e1e7;border-radius:12px;padding:24px}.num{display:inline-grid;place-items:center;border-radius:50%;background:#127c69;color:#fff;width:32px;height:32px;margin-right:10px}.step h3{margin:0 0 10px}.arrow{text-align:center;color:#127c69;font-size:28px}.transaction{border:2px solid #127c69;background:#edf9f4;padding:26px;border-radius:14px}.branches{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:20px 0}.branch{padding:20px;background:white;border-top:4px solid #168771;border-radius:8px}.extra{border-color:#d79726}.note{border-left:4px solid #d79726;background:#fff4dd;padding:18px 24px}.path{padding:20px;background:#12354b;color:#e4fff7;border-radius:10px;overflow-wrap:anywhere}code{background:#e2ecef;padding:2px 5px;border-radius:4px}a{color:#0b7564}header a{color:#9cead6}li{margin-bottom:8px}details{background:white;padding:18px;border-radius:10px;margin:12px 0}footer{margin-top:45px;color:#657b89}@media(max-width:700px){main{padding:16px}header{padding:24px}h1{font-size:28px}.steps,.branches{grid-template-columns:1fr}}@media print{body{background:white}header{background:white;color:#173347;border:1px solid}small,.subtitle{color:#173347}.step,.transaction{break-inside:avoid}}
+</style></head>
+<body><main>
+<header><small>GO INTERFACE · 有界批处理 · 业务控制事务</small><h1>先发现疑似差异，<br>再在事务内做最终决定。</h1><p class="subtitle">老表为权威：缺失补齐、差异覆盖、额外记录保留并报警。</p><p><a href="README.md">README</a> · <a href="reconcile.go">核心源码</a> · <a href="docs/interface-contracts.md">完整接口约定</a></p></header>
+<h2>一眼看懂整轮流程</h2>
+<div class="path">老表扫描 → 缓存一批 → 完整查询新表 → 比较并筛出候选 → 业务事务复核 → 清空缓存继续<br>老表扫描完成 → 反向扫描新表 → 按批查询老表 → 复核额外记录 → 只报警，不删除</div>
+<h2>第一遍：从老表找缺失和差异</h2>
+<div class="steps">
+<section class="step"><h3><span class="num">1</span>逐条扫描老表</h3><p><code>Old.Scan</code> 同步产出记录，<code>Records.Key</code> 提取稳定唯一的 identifier。写入注入的 <code>Cache</code>。</p><p>尚未满批时继续扫描；缓存不会累计整张表。</p></section>
+<section class="step"><h3><span class="num">2</span>批满后暂停读取</h3><p>达到 <code>BatchSize</code> 就同步处理整批。查询和复核返回以前，不再读取下一批，这就是背压。</p><p>只有 Scan 成功结束，才处理剩余尾批；扫描报错则停止。</p></section>
+<section class="step"><h3><span class="num">3</span>完整查询新表</h3><p><code>New.Lookup(keys)</code> 必须完整解析这一批 key。成功结果中缺少 key，才形成“疑似缺失”。</p><p>分页不完整、超时或部分失败必须报错，不能把它们当作查无记录。</p></section>
+<section class="step"><h3><span class="num">4</span>缓存比较只筛候选</h3><p>新表存在且 <code>Records.Equal</code> 相等：跳过。缺失或内容不同：交给 <code>Reviewer.Review</code>。</p><p>候选只是线索，不是写入指令；此处没有数据库写操作。</p></section>
+</div>
+<p class="note">关键区别：不是“一边扫新表，一边把没遇到的 key 当缺失”。每批都通过完整批量查询配对，避免把“尚未扫到”误判为“不存在”。</p>
+<div class="arrow">↓</div>
+<section class="transaction"><h2 style="margin-top:0">业务事务边界：重新读取，重新分类</h2><p>调用方的 Reviewer 开启事务 → 重读老表和新表 → 按新状态再次比较 → 报警或修复 → 提交。框架不替业务控制事务，也不绑定 SQL。</p>
+<div class="branches"><div class="branch"><strong>老有 / 新无</strong><p>只报警模式：报警。<br>修复模式：从老表插入新表。</p></div><div class="branch"><strong>两边存在但不同</strong><p>只报警模式：报警。<br>修复模式：用老表覆盖新表。</p></div><div class="branch extra"><strong>仅新表存在</strong><p>两种模式都保留并报警，绝不删除。</p></div></div>
+<p>两端已相等，或者两端都已不存在：跳过。即使候选原先显示“缺失”，也必须以事务内新状态为准。内存示例用同一把锁模拟这个边界。</p></section>
+<div class="arrow">↓</div>
+<section class="step"><h3>清空当前批缓存，继续下一批</h3><p>每批最多缓存 BatchSize 条。当前批处理完成才清空并继续；没有后台候选队列。老表完整扫描并处理尾批以后，才能进入第二遍。</p></section>
+<h2>第二遍：找仅新表存在的记录</h2>
+<div class="path">New.Scan → 缓存一批新表记录 → Old.Lookup(keys) 完整查询 → 老表查无记录 → Extra 候选 → Reviewer 重读两端并重新分类</div>
+<p>这次扫描专门发现额外记录。复核后若依然只有新表存在，保留并报警；若并发变化让它变成其他情况，则按最新状态处理。核心没有删除接口。</p>
+<h2>接口分别负责什么</h2>
+<ul><li><strong>Source：</strong>流式扫描和完整批量查询；负责底层查询、分页、扫描快照和 context 传播。</li><li><strong>Records：</strong>提取唯一键，定义业务内容相等；忽略哪些字段由调用方决定。</li><li><strong>Cache：</strong>保存当前批次；不可静默淘汰。默认 MemoryCache 有条数限制。</li><li><strong>Reviewer：</strong>事务重读、最终比较、告警与可选修复；不得直接信任候选快照。</li><li><strong>Engine：</strong>串行编排两个方向的分批配对、候选分发、清理与失败返回。</li></ul>
+<h2>运行、失败与一致性</h2>
+<details open><summary><strong>如何运行示例</strong></summary><p>在仓库根目录执行 <code>go run ./cmd/demo</code>。先运行 AlertOnly，再运行 Repair；示例最终保留额外记录，补齐缺失记录，覆盖不同内容。</p><p>验证命令：<code>go test -race ./...</code> 和 <code>go vet ./...</code>。需要 Go 1.22+，无第三方依赖。</p></details>
+<details><summary><strong>有界内存和取消</strong></summary><p>引擎缓存、key 和查询结果均为 O(BatchSize)，按条数而非字节计算。驱动与扫描器也需限制缓冲。内存示例复制全量 key，仅用于演示；生产应实现 keyset 分页并定义快照边界。</p><p>取消通过 context 传播，不能强制终止不响应取消的业务回调。Engine 和缓存不能在多轮并发运行间共享使用。</p></details>
+<details><summary><strong>错误如何处理</strong></summary><p>扫描、查询、缓存或复核任一失败，立即停止并返回部分统计，错误支持 errors.Is。已经提交的批次不回滚，业务处理须支持幂等重跑。Candidates 表示复核调用次数，不表示已确认修复数量。</p></details>
+<details open><summary><strong>“在线使用”不等于完整不停机迁移保证</strong></summary><p>事务复核只保护已发现的候选。并发修改仍可能造成扫描遗漏、重复候选或相等记录随后变化，不能保证单轮全局收敛。生产需结合一致性快照、高水位、版本校验、CDC 或定期重跑。</p><p>同 MySQL 实例可让业务复核共享事务；锁、唯一约束、缺失行的并发插入竞争及重试由适配器处理。跨实例需要独立的一致性方案。</p><p>当前 MVP 不含全量复制、增量同步、切流、持久化进度或真实 MySQL 适配器。</p></details>
+<footer>自包含离线 HTML，无外部依赖 · db-table-fulfill-reconcile-fix · 2026-11-06</footer>
+</main></body></html>
