@@ -4,18 +4,33 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	r "github.com/a52tianshi/db-table-fulfill-reconcile-fix"
-	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/internal/store"
-	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/mysqltable"
 	"io"
 	"testing"
 	"time"
+
+	r "github.com/a52tianshi/db-table-fulfill-reconcile-fix"
+	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/internal/store"
+	"github.com/a52tianshi/db-table-fulfill-reconcile-fix/mysqltable"
 )
 
 func regressionConfig(t *testing.T, p *mysqltable.Pair[store.Order, store.Key]) r.Config[store.Order, store.Key] {
 	t.Helper()
-	return r.Config[store.Order, store.Key]{Old: p.Old(), New: p.New(), Key: store.KeyOf, Compare: r.Exact[store.Order](), Policy: r.Policy{Missing: r.Fix, Different: r.Fix}, Insert: r.InsertBatchLocked, ExtraCheck: r.CheckExtra, Repairer: p.Repairer(), Notifier: r.LogNotifier[store.Order, store.Key]{W: io.Discard}, Progress: r.NoProgress, ScanPageSize: 3, BatchSize: 5, TxBatchSize: 3, MemoryLimit: r.NoMemoryLimit, Retry: r.Retry{MaxAttempts: 3, Backoff: time.Millisecond, MaxBackoff: time.Millisecond, Retryable: mysqltable.IsTransient}}
+	return r.Config[store.Order, store.Key]{
+		Old: p.Old(), New: p.New(), Key: store.KeyOf,
+		Compare:      r.Exact[store.Order](),
+		Policy:       r.Policy{Missing: r.Fix, Different: r.Fix},
+		Insert:       r.InsertBatchLocked,
+		ExtraCheck:   r.CheckExtra,
+		Repairer:     p.Repairer(),
+		Notifier:     r.LogNotifier[store.Order, store.Key]{W: io.Discard},
+		Progress:     r.NoProgress,
+		ScanPageSize: 3, BatchSize: 5, TxBatchSize: 3,
+		MemoryLimit: r.NoMemoryLimit,
+		Retry: r.Retry{MaxAttempts: 3, Backoff: time.Millisecond, MaxBackoff: time.Millisecond,
+			Retryable: mysqltable.IsTransient},
+	}
 }
+
 func TestWrongShardStopsRunWithoutDeleting(t *testing.T) {
 	for _, withOld := range []bool{false, true} {
 		t.Run(map[bool]string{false: "extra", true: "duplicate"}[withOld], func(t *testing.T) {
@@ -46,6 +61,7 @@ func TestWrongShardStopsRunWithoutDeleting(t *testing.T) {
 		})
 	}
 }
+
 func TestCorrectlyRoutedExtraWarnsAndRemains(t *testing.T) {
 	db := openDB(t)
 	o := order(1, 1)
@@ -60,11 +76,21 @@ func TestCorrectlyRoutedExtraWarnsAndRemains(t *testing.T) {
 		t.Fatalf("extra modified: %v %v", got, err)
 	}
 }
+
 func TestLockSortsAcrossChunksAgainstOnlineWriter(t *testing.T) {
 	db := openDB(t)
 	a, b := order(1, 1), order(2, 1)
 	insert(t, db, "it_old", a, b)
-	p, err := mysqltable.NewPair(mysqltable.PairConfig[store.Order, store.Key]{DB: db, Schema: store.Schema(), Old: mysqltable.Single[store.Key]("it_old"), New: mysqltable.Mod("it_new_%d", 4, func(k store.Key) int64 { return k.UserID }), TxOptions: &sql.TxOptions{Isolation: sql.LevelReadCommitted}, InChunk: 1, InsertChunk: 2, IsDuplicate: mysqltable.IsDuplicateKey})
+	p, err := mysqltable.NewPair(mysqltable.PairConfig[store.Order, store.Key]{
+		DB:          db,
+		Schema:      store.Schema(),
+		Old:         mysqltable.Single[store.Key]("it_old"),
+		New:         mysqltable.Mod("it_new_%d", 4, func(k store.Key) int64 { return k.UserID }),
+		TxOptions:   &sql.TxOptions{Isolation: sql.LevelReadCommitted},
+		InChunk:     1, // one key per IN query: lock order across chunks matters
+		InsertChunk: 2,
+		IsDuplicate: mysqltable.IsDuplicateKey,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +147,7 @@ func TestLockSortsAcrossChunksAgainstOnlineWriter(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 }
+
 func TestHighWaterIsKeyBoundNotTemporalSnapshot(t *testing.T) {
 	db := openDB(t)
 	insert(t, db, "it_old", order(1, 1), order(3, 1), order(5, 1))

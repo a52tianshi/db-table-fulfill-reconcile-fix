@@ -560,6 +560,7 @@ func TestNotifyFailureCountsAllConfirmedExtras(t *testing.T) {
 		t.Fatalf("%v err=%v rows=%v", rep, err, s.Rows(false))
 	}
 }
+
 func TestNotifyFailureDoesNotCountUncommittedChunks(t *testing.T) {
 	s := memtable.New(key, []row{{1, "fresh", ""}, {2, "fresh", ""}, {3, "fresh", ""}}, nil)
 	cfg := config(s)

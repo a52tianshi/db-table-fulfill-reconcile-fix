@@ -23,10 +23,12 @@ type scriptConn struct{ query queryScript }
 func (scriptConn) Prepare(string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("prepare not supported by script")
 }
+
 func (scriptConn) Close() error { return nil }
 func (scriptConn) Begin() (driver.Tx, error) {
 	return nil, fmt.Errorf("transaction not used by script")
 }
+
 func (c scriptConn) QueryContext(_ context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	rows, err := c.query(q, args)
 	return &scriptRows{rows: rows}, err
@@ -73,6 +75,7 @@ func scriptPair(t *testing.T, query queryScript) *Pair[order, key] {
 	}
 	return p
 }
+
 func TestLockSortsBeforeINChunking(t *testing.T) {
 	var got []int64
 	p := scriptPair(t, func(q string, args []driver.NamedValue) ([][]driver.Value, error) {
@@ -94,6 +97,7 @@ func TestLockSortsBeforeINChunking(t *testing.T) {
 		t.Fatalf("must not mutate caller keys: %v", keys)
 	}
 }
+
 func TestScanRejectsWrongShardHighWaterRow(t *testing.T) {
 	p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
 		return [][]driver.Value{{int64(7), int64(1)}}, nil
@@ -103,6 +107,7 @@ func TestScanRejectsWrongShardHighWaterRow(t *testing.T) {
 		t.Fatalf("expected wrong physical shard error, got %v", err)
 	}
 }
+
 func TestScanRejectsWrongShardBelowHighWater(t *testing.T) {
 	p := scriptPair(t, func(q string, _ []driver.NamedValue) ([][]driver.Value, error) {
 		if strings.Contains(q, "DESC LIMIT 1") {
@@ -115,6 +120,7 @@ func TestScanRejectsWrongShardBelowHighWater(t *testing.T) {
 		t.Fatal("wrong-shard page row must be rejected, not returned as a valid scan")
 	}
 }
+
 func TestLookupRejectsWrongShardRow(t *testing.T) {
 	p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
 		return [][]driver.Value{{int64(7), int64(1)}}, nil
@@ -139,6 +145,7 @@ func TestMisroutedErrorDetailsAndClassification(t *testing.T) {
 		t.Fatal("routing errors must not be classified transient")
 	}
 }
+
 func TestLockSortsMultipleKeysPerChunk(t *testing.T) {
 	var got [][]int64
 	p := scriptPair(t, func(_ string, args []driver.NamedValue) ([][]driver.Value, error) {
@@ -157,6 +164,7 @@ func TestLockSortsMultipleKeysPerChunk(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
 func TestOldSideScanAlsoRejectsWrongShard(t *testing.T) {
 	p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
 		return [][]driver.Value{{int64(7), int64(1)}}, nil

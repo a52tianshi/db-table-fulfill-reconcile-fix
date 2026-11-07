@@ -85,28 +85,27 @@ bin/e2e reconcile -progress-every 500ms              # 进度日志间隔（0 = 
 
 | `INSERT_MODE` | `FAIL_RATE` | 第一轮 | 第二轮覆盖旧值 | 第三轮修复 | 重试 = 注入 |
 |---|---|---|---|---|---|
-| `batch-snapshot` | 0 | 5.1s | 151 行 | 0 | — |
-| `batch-snapshot` | 0.02 | 6.2s | 137 行 | 0 | 178+22+11，全部相等 |
-| `batch-locked` | 0 | 7.2s | 0 | 0 | — |
-| `batch-locked` | 0.02 | 8.5s | 0 | 0 | 182+7+10，全部相等 |
+| `batch-snapshot` | 0 | 5.5s | 82 行 | 0 | — |
+| `batch-snapshot` | 0.02 | 6.6s | 92 行 | 0 | 188+8+10，全部相等 |
+| `batch-locked` | 0 | 7.7s | 0 | 0 | — |
+| `batch-locked` | 0.02 | 13.7s | 0 | 0 | 193+12+9，全部相等 |
 | `per-row` | 0 | 53s | 0 | 0 | — |
-| `per-row` | 0.02 | 112s | 0 | 0 | 1997+18+22，全部相等 |
+| `per-row` | 0.02 | 62s | 0 | 0 | 1984+26+26，全部相等 |
 
 其他组合（同样全部通过）：
 
 | 参数 | 第一轮 | 说明 |
 |---|---|---|
-| `INSERT_MODE=batch-locked PAGE=97 BATCH=250 TX_BATCH=17 MEMORY_LIMIT=8000 FAIL_RATE=0.05` | 45s | 页、批、事务大小互不整除，内存上限生效，重试 2498 = 注入 2498 |
-| `DIST=uniform FAIL_RATE=0.05` | 12s | 100 张分表均匀分布，第二轮覆盖 227 行旧值 |
+| `INSERT_MODE=batch-locked PAGE=97 BATCH=250 TX_BATCH=17 MEMORY_LIMIT=8000 FAIL_RATE=0.05` | 46s | 页、批、事务大小互不整除，内存上限生效，第一轮重试 2537 = 注入 2537 |
+| `DIST=uniform FAIL_RATE=0.05` | 9.7s | 100 张分表均匀分布，第二轮覆盖 145 行旧值 |
 
 几点解读：
 
 - 第二轮覆盖的行数，取决于扫描和插入之间有多少行恰好被线上改动，每次运行都不一样。只有 `batch-snapshot` 会出现，另两种一次就写对。
 - 注入故障的成本主要是重试前的等待（`-retry-backoff` 默认 5ms，按次翻倍）。`per-row` 第一轮有 5 万多个事务，注入次数最多，所以变慢最明显。
-- 页、批设得很小时明显变慢（45s 对比约 7s），因为 SQL 条数多了。生产环境建议保持在 1000 左右。
+- 页、批设得很小时明显变慢（46s 对比约 8s），因为 SQL 条数多了。生产环境建议保持在 1000 左右。
 
-## 本轮修复的回归
+## 注意事项
 
-`mysqltable_it/regression_test.go` 验证逆序传入 key 配合 `InChunk=1` 时，适配器先等待较小主键，不再与升序业务事务构造既有死锁环；正确路由的 Extra 保留并报警，物理错片记录则返回 ErrMisrouted，不删除数据。
-
-`store.Schema()` 已填写必需的 KeyLess：按 OrderID 数值升序。集成测试在 MySQL 不可达时会 Skip，验证时应检查输出，不能把 Skip 当通过。测试会重建专用测试表，完整 E2E 会 DROP DSN 库中的测试表，必须使用隔离实例/专用库。
+- `mysqltable_it` 在 MySQL 连不上时会 Skip，验证时请用 `go test -v` 确认没有被跳过，不要把 Skip 当成通过。
+- 集成测试会重建 `reconcile_it` 库里的测试表，完整 e2e 会 DROP DSN 指向的库里的测试表，请使用专用库或隔离实例。

@@ -116,6 +116,7 @@ func TestWithinInt64Boundaries(t *testing.T) {
 		}
 	}
 }
+
 func TestWithinRejectsNegativeTolerance(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -124,6 +125,7 @@ func TestWithinRejectsNegativeTolerance(t *testing.T) {
 	}()
 	r.Within("value", func(v int64) int64 { return v }, -1)
 }
+
 func FuzzWithin(f *testing.F) {
 	f.Add(int64(math.MinInt64), int64(math.MaxInt64), int64(1))
 	f.Add(int64(-2), int64(2), int64(4))
@@ -139,6 +141,7 @@ func FuzzWithin(f *testing.F) {
 		}
 	})
 }
+
 func TestStructRejectsPromotedFieldConfiguration(t *testing.T) {
 	type Embedded struct{ Timestamp int64 }
 	type rec struct {
@@ -149,20 +152,22 @@ func TestStructRejectsPromotedFieldConfiguration(t *testing.T) {
 		ID int
 		*Embedded
 	}
-	for _, name := range []string{"ignore value", "custom value", "ignore pointer", "custom pointer"} {
+	never := func(ptrRec, ptrRec) bool { t.Fatal("must reject before comparing"); return false }
+	cases := map[string]func() error{
+		"ignore value": func() error { _, err := r.Struct[rec]([]string{"Timestamp"}); return err },
+		"custom value": func() error {
+			_, err := r.Struct[rec](nil, r.Within("Timestamp", func(v rec) int64 { return v.Timestamp }, 5))
+			return err
+		},
+		"ignore pointer": func() error { _, err := r.Struct[ptrRec]([]string{"Timestamp"}); return err },
+		"custom pointer": func() error {
+			_, err := r.Struct[ptrRec](nil, r.Field[ptrRec]{Name: "Timestamp", Equal: never})
+			return err
+		},
+	}
+	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {
-			var err error
-			switch name {
-			case "ignore value":
-				_, err = r.Struct[rec]([]string{"Timestamp"})
-			case "custom value":
-				_, err = r.Struct[rec](nil, r.Within("Timestamp", func(v rec) int64 { return v.Timestamp }, 5))
-			case "ignore pointer":
-				_, err = r.Struct[ptrRec]([]string{"Timestamp"})
-			case "custom pointer":
-				_, err = r.Struct[ptrRec](nil, r.Field[ptrRec]{Name: "Timestamp", Equal: func(ptrRec, ptrRec) bool { t.Fatal("must reject before invoking custom comparison"); return false }})
-			}
-			if err == nil || !strings.Contains(err.Error(), "top-level") {
+			if err := build(); err == nil || !strings.Contains(err.Error(), "top-level") {
 				t.Fatalf("expected explicit top-level field error, got %v", err)
 			}
 		})
