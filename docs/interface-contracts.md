@@ -110,4 +110,19 @@ flowchart TB
 | 数据契约破坏 / Invariant | 重复扫描 key、Lookup/Lock 返回非请求 key 等错误 | 停止；事务内契约错误不因 Retryable=true 而重试。不要通过忽略错误继续切流。 |
 | 通知失败 / Notify error | 返回错误保留 `errors.Is` 链；操作前缀为 `notify` | 已提交数据保持；按 Retry 处理，耗尽停止。需要可靠事件时外置持久化投递方案。 |
 
+### Error classification (English)
+
+For on-call readers: this table is the same classification as above, in English. These are *existing* observable categories, not a new string-code API. Always branch on `errors.Is` / `errors.As`, never on the full message. Numeric MySQL codes are recognised from the driver message; other drivers must supply their own classifier.
+
+| Category | Detection | Engine behaviour / action |
+|---|---|---|
+| Invalid config | `Run` / `NewPair` return an aggregated error (no exported sentinel yet) | No data access. Fix the required fields. Comparators may also fail; a negative `Within` tolerance panics. |
+| Canceled / deadline | `errors.Is(err, context.Canceled)` or `context.DeadlineExceeded` | Not retried. Transactions already committed stay committed. Rerun with a fresh context. |
+| Write conflict (MySQL 1062) | `errors.Is(err, reconcile.ErrConflict)` | Not retried as-is; snapshot insert falls back to a locking recheck, at most 3 extra rounds; persistent contention returns an error. |
+| Misrouted row | `errors.Is(err, mysqltable.ErrMisrouted)`; `errors.As` yields `*MisroutedError` | `IsTransient` reports it as permanent. Stop and check routing/sharding manually; the library never moves or deletes rows. |
+| Transient (1213, 1205, 2006, 2013, 1040) | `mysqltable.IsTransient(err)` | Retried within `MaxAttempts` and the backoff cap; the whole transaction reruns and rereads. |
+| Bad connection | `driver.ErrBadConn`, `sql.ErrConnDone`, plus the message classifier | Same as above. A lost COMMIT ack is not a rollback; repair counters may under-count. |
+| Invariant broken | Re-scanned keys, Lookup/Lock returning unrequested keys, etc. | Stop. Contract violations inside a transaction are never retried, even with `Retryable: return true`. Do not cut traffic over by ignoring the error. |
+| Notify failure | Error keeps its `errors.Is` chain; step prefix is `notify` | Committed data stays. Handled by the Retry policy, then stops when exhausted. Use an outbox for reliable events. |
+
 排障和恢复步骤见 [运维手册](operations.md)，测试证据和未覆盖的物理故障见 [测试口径](testing.md)。
