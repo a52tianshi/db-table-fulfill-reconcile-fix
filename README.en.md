@@ -53,7 +53,7 @@ Actual output excerpt (timing varies):
 PASS
 ```
 
-For a read-only default Go cache, first set `export GOCACHE=/tmp/codex-clarity-go-build`. If the MySQL client's socket does not match your server, add `-h 127.0.0.1` to the database creation command.
+If the MySQL client's socket does not match your server, add `-h 127.0.0.1` to the database creation command.
 
 ## 1. Workflow and concepts
 

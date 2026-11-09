@@ -230,7 +230,7 @@ func (t tx[T, K]) Insert(ctx context.Context, rows []T) error {
 			}
 			if _, err := t.tx.ExecContext(ctx, t.p.q.insert(table, n), args...); err != nil {
 				if t.p.cfg.IsDuplicate(err) {
-					return fmt.Errorf("%s: %w: %v", table, reconcile.ErrConflict, err)
+					return fmt.Errorf("%s: %w: %w", table, reconcile.ErrConflict, err)
 				}
 				return fmt.Errorf("%s: %w", table, err)
 			}

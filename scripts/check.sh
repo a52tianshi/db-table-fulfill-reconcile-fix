@@ -23,8 +23,11 @@ lint() {
     printf 'gofmt required:\n%s\n' "$unformatted" >&2
     return 1
   fi
-  bash -n scripts/check.sh e2e/run.sh
-  printf 'lint PASS (gofmt + bash -n)\n'
+  local script
+  for script in scripts/check.sh e2e/run.sh; do
+    bash -n "$script"
+  done
+  printf 'lint PASS (gofmt + bash -n, per script)\n'
 }
 integration() {
   local log
@@ -35,6 +38,14 @@ integration() {
   # not mistake that successful Go exit status for database validation.
   if grep -q -- '--- SKIP:' "$log"; then
     printf 'integration FAIL: skipped MySQL tests; database evidence is missing\n' >&2
+    return 1
+  fi
+  # Guard against renamed or deleted tests: a run that executes fewer than the
+  # 11 integration tests is not the evidence this gate claims to provide.
+  local passed
+  passed=$(grep -c -- '--- PASS:' "$log" || true)
+  if [[ "${passed:-0}" -lt 11 ]]; then
+    printf 'integration FAIL: only %s tests passed (expected >= 11)\n' "${passed:-0}" >&2
     return 1
   fi
 }

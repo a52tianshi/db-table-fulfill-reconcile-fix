@@ -10,11 +10,22 @@
 - e2e 数据计划回归：小规模 uniform 的行数/路由与默认 skew 的冻结分页边界保持原有含义。
 - 运维、安全、贡献与验证文档，明确通知非可靠投递、扫描高水位非时间快照、无持久化检查点等边界。
 
+### Fixed
+
+- `mysqltable` 冲突错误改用 `%w: %w` 包装，驱动错误链不再被 `%v` 截断；报错文本与 `errors.Is(err, ErrConflict)` 行为不变。
+- 最小权限说明纠正为 `SELECT + LOCK TABLES`：复核事务对两侧都做 `FOR UPDATE`，MySQL 8.0.22 起只授 `SELECT` 会在首个事务报 1142 并终止（含 Warn 模式）。
+- 提交响应丢失回归补上 Insert 事务路径（原用例的批次切分使故障只落在 Update 事务上），并加断言 `faultedInserts > 0` 防止再次退化。
+- e2e 接入通知阶段故障注入并输出分阶段计数（scan / lookup / txBegin / txPreCommit / notify）。
+- `scripts/check.sh` 逐脚本执行 `bash -n`（原来只检查第一个文件），集成门禁额外要求至少 11 个 PASS。
+- 文档撤回 `func(error) bool { return true }` 的重试建议，改为 `mysqltable.IsTransient`，避免永久错误（错片、foreign cursor）被反复重试。
+- 契约补充快照模式丢应答的重试路径（盲插 → 1062 → 锁定复核），并声明自定义 `Tx.Insert` 不得实现为 upsert。
+- 运维文档补充 DSN `readTimeout` / `writeTimeout` 与 `innodb_lock_wait_timeout` 要求（库本身无单步超时）。
+
 ### Migration note / 迁移说明
 
-本次没有修改公开 API、业务执行代码、数据库结构、依赖版本或对账数据面语义；旧调用方式保持可用，无需迁移，不需要 deprecated 包装。新增检查入口不替换或削弱原测试；直接运行集成测试仍保留原有 Skip 语义，只有新发布门禁拒绝把 Skip 算作数据库验证成功。
+本次没有修改公开 API 签名、数据库结构、依赖版本或对账数据面语义；唯一的行为侧改动是冲突错误的包装方式（`%v` → `%w`），它只让 `errors.As` 能取到驱动错误，报错文本与分类结果不变。旧调用方式保持可用，无需迁移，不需要 deprecated 包装。新增检查入口不替换或削弱原测试；直接运行集成测试仍保留原有 Skip 语义，只有新发布门禁拒绝把 Skip 算作数据库验证成功。
 
-`ROWS=2000` 的快速验证需额外传 `DIST=uniform`，因为现有默认 skew 数据集要求至少 27009 行。脚本默认值及 skew 边界分布未修改。验证环境沙箱阻止 MySQL 连接，未宣称 e2e 已通过，详见 VERIFICATION。
+`ROWS=2000` 的快速验证需额外传 `DIST=uniform`，因为现有默认 skew 数据集要求至少 27009 行。脚本默认值及 skew 边界分布未修改。验证记录见 VERIFICATION：build / vet / race、11 个真实 MySQL 集成测试、2000 行 uniform 与 30000 行 skew 的 e2e 均通过；`ROWS=2000` 需显式 `DIST=uniform`，默认 skew 数据集要求至少 27009 行。
 
 ## v0.1.0 — 本次工作的已存在基线 / Existing baseline
 

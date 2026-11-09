@@ -5,7 +5,8 @@
 ## 接入与上线 / Rollout
 
 1. 明确老表是权威源，确认新旧表列结构相同、主键唯一、`K` 中主键和分片字段不可变。路由、表清单和字符串 collation 必须与线上写入一致。
-2. 为本库使用单独账号：老表 SELECT（锁定读所需权限依 MySQL 版本确认），新表 SELECT / INSERT / UPDATE。库不会 DELETE 或建表；e2e 的建库和 DROP 权限仅属于隔离测试账号。生产账号不使用 root。
+2. 为本库使用单独账号：**老表需要 `SELECT` + `LOCK TABLES`**——`mysqltable` 的复核事务对两侧都执行 `SELECT ... FOR UPDATE`，而 MySQL 8.0.22 起锁定读还要求会话对表具备 `UPDATE`、`DELETE`、`LOCK TABLES` 三者之一，只授 `SELECT` 会在第一个复核事务上报 `1142`，且该错误不属于 `IsTransient`，`Run` 会直接退出（`Missing=Warn` 的 Warn 模式同样如此，因为它也要复核）。新表需要 `SELECT` / `INSERT` / `UPDATE`。库不会 `DELETE` 或建表；e2e 的建库和 `DROP` 权限仅属于隔离测试账号。生产账号不使用 root。
+
 3. 先验证业务同事务双写，老表先锁、新表后锁，同侧按数据库主键序锁定。适配器只支持一个 `*sql.DB` 内的事务；跨实例必须另行实现 Repairer 并证明一致性边界。
 4. 先以 `Missing=Warn, Different=Warn` 运行，检查 Extra、错片、差异规模。Warn 仍使用复核事务和行锁，不是零负载探测。
 5. 确认权威源及数据保留要求后启用 Fix，通常选 `InsertBatchLocked`。快照模式仅在老表不删除、Different=Fix 且收敛前新表不对外读时使用。
@@ -17,6 +18,7 @@
 
 - 引擎串行、有界攒批；配置 `ScanPageSize`、`BatchSize`、`TxBatchSize` 和适配器 `InChunk` / `InsertChunk` 共同控制 SQL 数量、锁时长和峰值内存。`MemoryLimit` 只限制估算缓存批，不是 RSS；驱动、扫描页和查询结果另占内存。
 - 库没有每秒行数限流或跨任务互斥。由调用方限制调度频率、连接池与同时运行的任务数量；先按代表性数据观察 DB CPU、锁等待、连接数和延迟，再调整批大小。
+- **连接与锁超时必须配在 DSN 上**：库没有单步/单事务超时，`Run(ctx)` 的取消只在下一次检查点生效，正在执行的 `Lock` 或 `Exec` 不会被中断。生产 DSN 至少设置 `readTimeout`、`writeTimeout`、`timeout`（连接），并把 `innodb_lock_wait_timeout` 调到业务可接受的上限，否则慢 SQL 或网络半开会长期持有行锁、阻塞线上双写。
 - 监控 Run error、完成耗时、`Retries` 增长、Extra、连续多轮 Missing/Different、`Inserted/Updated` 和双写错误；指标阈值由业务容量演练确定，本库没有通用 SLA。
 - `Suspected` 与 `Stale` 在并发双写时可以增加；`Warned` 不等于告警投递成功数。Progress 同步执行，回调阻塞会延迟扫描；使用有界异步投递并明确队列满策略。
 - `LogNotifier` 会包含 key / 差异信息。不要无筛选记录完整业务行、DSN 或凭据。可靠通知需业务持久化 outbox / 恢复协议；重复 Run 不会保证重放已经修复的 Finding。
@@ -53,4 +55,4 @@ E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" ./e2e/bin/e2e reconcile
 
 ## 版本与支持 / Compatibility
 
-发布、deprecation 与迁移规则见 [CHANGELOG](../CHANGELOG.md)。根 module 的 Go 下限为 1.22，且不捆绑 SQL 驱动；e2e 是独立 module，已有 MySQL 驱动仅用于验证。CI 配置 Go 1.22.x / 1.25.4 与 MySQL 8.4，本轮真实执行环境由用户提供为 Go 1.25.4 / MySQL 9.7.1，上一轮数据库访问受限，本轮真实 MySQL 集成、2000 行 uniform 和 30000 行 skew e2e 已通过。不能据此承诺所有 MySQL 版本或 MariaDB 兼容。
+发布、deprecation 与迁移规则见 [CHANGELOG](../CHANGELOG.md)。根 module 的 Go 下限为 1.22，且不捆绑 SQL 驱动；e2e 是独立 module，已有 MySQL 驱动仅用于验证。CI 配置 Go 1.22.x / 1.25.4 与 MySQL 8.4，本次验证环境为 Go 1.25.4 / MySQL 9.7.1，真实 MySQL 集成、2000 行 uniform 与 30000 行 skew 的 e2e 已通过。不能据此承诺所有 MySQL 版本或 MariaDB 兼容。

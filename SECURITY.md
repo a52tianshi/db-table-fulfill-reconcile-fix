@@ -10,7 +10,16 @@
 
 ## 部署边界 / Deployment boundary
 
-- 生产账号最小权限、限制网络来源并按部署要求启用 TLS。测试 quickstart 的本机无密码 root 不用于生产。
+- 生产账号最小权限：**老表必须 `SELECT` + `LOCK TABLES`**。复核事务对两侧都执行 `SELECT ... FOR UPDATE`，MySQL 8.0.22 起锁定读要求 `UPDATE` / `DELETE` / `LOCK TABLES` 三者之一，只授 `SELECT` 会在首个复核事务报 `1142` 并直接终止（Warn 模式同样复核，同样失败）。新表需要 `SELECT`、`INSERT`、`UPDATE`。
+
+  ```sql
+  -- 授权示例（生产账号，不含 DROP/ALTER/DELETE）
+  GRANT SELECT, LOCK TABLES ON prod_db.orders_old TO 'reconciler'@'%';
+  GRANT SELECT, INSERT, UPDATE ON prod_db.orders_new_00 TO 'reconciler'@'%';
+  ```
+
+  完整上线清单见 [运维手册](docs/operations.md)。
+- 生产账号限制网络来源并按部署要求启用 TLS。测试 quickstart 的本机无密码 root 不用于生产。
 - Schema、Router、表名清单与回调是受信任的应用代码，不接收终端用户任意表名或 SQL。参数值使用占位符不等于允许不受信任的路由配置。
 - 引擎不会删 Extra，也不会修复错片；没有跨实例原子性、通知可靠交付或整轮回滚。不要把 `Consistent()` 单独作为授权切流的依据。
 - `Finding` 包含整行数据，通知实现和日志应按业务数据分级控制访问、保留与脱敏。

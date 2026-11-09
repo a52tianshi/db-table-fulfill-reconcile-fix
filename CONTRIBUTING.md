@@ -10,7 +10,7 @@
 ./scripts/check.sh all
 ```
 
-该命令运行两个 module 的 `go build ./...`、`go vet ./...`，根模块 `go test -race -count=1 ./...` 和 e2e 非数据库包的 race 测试，最后执行 lint。lint 明确仅为 `gofmt -l .` 与 `bash -n`，不包含 staticcheck / golangci-lint，不下载第三方工具、不自动改文件。CI 分步调用同一脚本。缓存只读的沙箱可设置 `GOCACHE=/tmp/codex-clarity-go-build`。
+该命令运行两个 module 的 `go build ./...`、`go vet ./...`，根模块 `go test -race -count=1 ./...` 和 e2e 非数据库包的 race 测试，最后执行 lint。lint 明确仅为 `gofmt -l .` 与 `bash -n`，不包含 staticcheck / golangci-lint，不下载第三方工具、不自动改文件。CI 分步调用同一脚本。缓存目录不可写时可用 `GOCACHE=$(mktemp -d)` 指定临时缓存。
 
 数据库验证使用隔离库；运行前阅读脚本的 DROP 范围：
 

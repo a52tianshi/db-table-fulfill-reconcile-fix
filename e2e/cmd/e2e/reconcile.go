@@ -75,7 +75,7 @@ func reconcileCmd(fs *flag.FlagSet) func(context.Context, *sql.DB) error {
 			Insert:     modes[*insertMode],
 			ExtraCheck: r.CheckExtra,
 			Repairer:   chaos.Repairer(pair.Repairer()),
-			Notifier:   r.LogNotifier[store.Order, store.Key]{W: os.Stdout},
+			Notifier:   chaos.Notifier(r.LogNotifier[store.Order, store.Key]{W: os.Stdout}),
 			Progress:   progress,
 
 			ScanPageSize: *page,
@@ -90,7 +90,9 @@ func reconcileCmd(fs *flag.FlagSet) func(context.Context, *sql.DB) error {
 				Retryable:   mysqltable.IsTransient,
 			},
 		})
-		fmt.Printf("[%s] insert=%s injected=%d %s\n", *label, *insertMode, chaos.Injected(), rep)
+		st := chaos.Stats()
+		fmt.Printf("[%s] insert=%s injected=%d (scan=%d lookup=%d txBegin=%d txPreCommit=%d notify=%d) %s\n",
+			*label, *insertMode, st.Total(), st.Scan, st.Lookup, st.TxBegin, st.TxPreCommit, st.Notify, rep)
 		if err != nil {
 			return err
 		}

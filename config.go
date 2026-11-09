@@ -49,8 +49,10 @@ type Retry struct {
 	MaxAttempts int           // total attempts per step, >= 1 (1 = no retry)
 	Backoff     time.Duration // wait before the 2nd attempt, > 0; doubles each time
 	MaxBackoff  time.Duration // cap for the wait, >= Backoff
-	// Retryable decides which errors are worth another attempt, e.g.
-	// mysqltable.IsTransient, or func(error) bool { return true }.
+	// Retryable decides which errors are worth another attempt, usually
+	// mysqltable.IsTransient. Returning true for every error is possible but
+	// discouraged: permanent failures (ErrMisrouted, foreign cursor, notifier
+	// misconfiguration) would then be retried MaxAttempts times.
 	// context cancellation and ErrConflict are never retried.
 	Retryable func(error) bool
 }

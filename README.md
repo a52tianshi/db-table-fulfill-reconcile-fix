@@ -28,18 +28,16 @@ mysql -u root -e "CREATE DATABASE IF NOT EXISTS reconcile_codex"
 E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
 ```
 
-小数据必须指定 `DIST=uniform`：默认 `skew` 为覆盖分页边界要求至少 27009 行。缩小参数仅用于快速验证，全量脚本默认值未改。本轮 2000 行 uniform 与 30000 行默认 skew 均得到 `E2E PASS`。
-
-2000 行 uniform 本轮终端真实输出片段（设置可写的 `GOCACHE` 后）：
+小数据必须指定 `DIST=uniform`：默认 `skew` 为覆盖分页边界要求至少 27009 行。缩小参数仅用于快速验证，全量脚本默认值未改。2000 行 uniform 与 30000 行默认 skew 均以 `E2E PASS` 结束。预期输出（行数取决于数据规模）：
 
 ```text
-[verify] old=20829 new=20829 checked=20829 missing=0 different=0 misrouted=0 extra=0 | 123ms
+[verify] old=<N> new=<N> checked=<N> missing=0 different=0 misrouted=0 extra=0
 [verify] PASS: old and new tables are identical
 
 E2E PASS
 ```
 
-上一轮受限，本轮已复跑。原样省略 `DIST=uniform` 的 2000 行命令仍因 skew 最小行数约束失败；详细命令、失败和成功的完整输出见 [VERIFICATION.md](VERIFICATION.md)。没有数据库也能运行现有内存示例，验证缺失插入、整行覆盖与 Extra 保留；二次运行幂等性由单测另行验证：
+完整命令与输出见 [VERIFICATION.md](VERIFICATION.md)。没有数据库也能运行现有内存示例，验证缺失插入、整行覆盖与 Extra 保留；二次运行幂等性由单测另行验证：
 
 ```sh
 go test -count=1 -v -run '^Example$' .
@@ -53,7 +51,7 @@ go test -count=1 -v -run '^Example$' .
 PASS
 ```
 
-若环境禁止写入 Go 默认缓存，可先执行 `export GOCACHE=/tmp/codex-clarity-go-build`。MySQL 用 TCP 连接且客户端 socket 不匹配时，建库命令加 `-h 127.0.0.1`。本文后续讲解 API；[概念和错误码](docs/interface-contracts.md#概念表--glossary)、[已实现状态流](docs/state-machine.md#当前实现与设计边界--implementation-status)、[测试口径](docs/testing.md) 可按需查阅。
+MySQL 用 TCP 连接且客户端 socket 不匹配时，建库命令加 `-h 127.0.0.1`。本文后续讲解 API；[概念和错误码](docs/interface-contracts.md#概念表--glossary)、[已实现状态流](docs/state-machine.md#当前实现与设计边界--implementation-status)、[测试口径](docs/testing.md) 可按需查阅。
 
 ## 1. 工作流程
 
@@ -141,7 +139,7 @@ flowchart LR
 | `MaxAttempts` | 5 | 每一步最多尝试几次（1 = 不重试） |
 | `Backoff` | 50ms | 第一次重试前等多久，之后每次翻倍 |
 | `MaxBackoff` | 2s | 等待时间上限 |
-| `Retryable` | `mysqltable.IsTransient` | 哪些错误值得重试。`IsTransient` 覆盖死锁、锁等待超时、连接断开等；也可以传 `func(error) bool { return true }`，表示全部重试 |
+| `Retryable` | `mysqltable.IsTransient` | 哪些错误值得重试。`IsTransient` 覆盖死锁、锁等待超时、连接断开等；不建议传 `func(error) bool { return true }`：它会把 `ErrMisrouted`（错片）、`foreign cursor`、通知器配置错误等永久错误一起重试 `MaxAttempts` 次，错片还会反复加 `FOR UPDATE` 锁。需要放宽时用 `func(err error) bool { return mysqltable.IsTransient(err) || errors.Is(err, myErr) }` |
 
 - 某一步超过 `MaxAttempts` 仍然失败，`Run` 立即返回 `scan old page 3: giving up after 5 attempts: <最后一次的错误>`。已提交的事务不回滚，修好问题后重跑即可（幂等）。
 - context 取消、引擎自身的不变量错误（例如同一批里出现重复 key）不会重试，直接退出。

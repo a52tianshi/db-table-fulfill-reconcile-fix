@@ -19,9 +19,9 @@
 
 ## 覆盖率 / Coverage
 
-以下覆盖率为上一轮测量，本轮复跑 build/vet/race 与真实数据库验证，没有重新测量覆盖率。
+以下覆盖率按本节给出的命令测量，可复现。
 
-根 module 使用 `go test -race -count=1 -coverpkg=./... -coverprofile=... ./...`。分母是根 module 三个包的**可执行语句**，不是行、分支、场景或生产流量覆盖。`-coverpkg=./...` 将根包测试调用 memtable 的执行也计入；仅看默认逐包 go test 会低估 memtable 的使用覆盖。多个测试二进制的同一位置按覆盖集合合并，不把各行百分比相加。
+根 module 的可复现命令：`go test -race -count=1 -coverpkg=./... -coverprofile=/tmp/cover.out ./... && go tool cover -func=/tmp/cover.out | tail -1`（下表合计 86.2% 即该命令 `total:` 行）。分母是根 module 三个包的**可执行语句**，不是行、分支、场景或生产流量覆盖。`-coverpkg=./...` 将根包测试调用 memtable 的执行也计入；仅看默认逐包 go test 会低估 memtable 的使用覆盖。多个测试二进制的同一位置按覆盖集合合并，不把各行百分比相加。
 
 | 包 / Package | 已执行 / 总语句 | 覆盖率 |
 |---|---|---|
@@ -34,7 +34,7 @@
 
 ## 未覆盖分支与风险 / Gaps and risk
 
-- **覆盖分母边界**：上一轮 `mysqltable.InTx`、Lock、Insert、Update 在根 module 覆盖报告为 0%；本轮独立 e2e module 的真实 MySQL 集成/e2e 已通过，但不计入该覆盖率分母。根包的 memtable 事务通过本身不证明 MySQL 隔离级别、网络、锁或驱动行为。远程 CI 未执行。
+- **覆盖分母边界**：`mysqltable.InTx`、Lock、Insert、Update 在根 module 的覆盖报告中为 0%；独立 e2e module 的真实 MySQL 集成/e2e 已通过，但不计入该覆盖率分母。根包的 memtable 事务通过本身不证明 MySQL 隔离级别、网络、锁或驱动行为。远程 CI 未执行。
 - **高风险、需要独立故障演练**：实际 COMMIT 响应丢失、数据库故障转移、进程/磁盘故障尚未注入。新增 mock 只在真实 memtable 提交之后返回错误，验证引擎恢复契约；现有 Chaos 只模拟 SQL 前或 COMMIT 前失败，不能代表实际网络断连。
 - **中风险**：ScanPage 57.6%，未覆盖全部查询/解码错误、游标与空/尾页组合；根模块 SQL 测试驱动不是数据库。本轮真实分页、高水位集成测试与 30000 行 skew 已通过，包含 999/1000/1001 等固定分布；仍不等于穷尽分页与错误组合。
 - **中风险**：根包 recheckTx 88.6%、retry.do 83.3%，仍有缺失双端、Lock/Insert 中途失败、取消恰逢退避等待等组合未覆盖。现有失败及回滚测试保护主要契约，但不等于完整故障矩阵。
