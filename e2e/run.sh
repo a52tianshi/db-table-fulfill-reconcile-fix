@@ -24,13 +24,48 @@ mkdir -p bin logs
 go build -o bin/e2e ./cmd/e2e
 step() { printf '\n==== %s ====\n' "$*"; }
 
+CLEANUP_PIDS=()
+cleanup() {
+  local pid
+  for pid in "${CLEANUP_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+}
+trap cleanup EXIT
+
+# LATENCY_MS simulates a production network: every DB round trip pays extra
+# latency. The whole flow (writer, reconcile, verify) then goes through the
+# proxy, so timeouts, lock waits and retry paths see realistic RTTs.
+if [ -n "${LATENCY_MS:-}" ]; then
+  case "$LATENCY_MS" in
+    ''|*[!0-9]*) echo "LATENCY_MS must be an integer number of milliseconds" >&2; exit 2 ;;
+  esac
+  if [ "$LATENCY_MS" -gt 0 ]; then
+    LATENCY_PORT=${LATENCY_PORT:-3307}
+    DB_ADDR=$(printf '%s' "$E2E_MYSQL_DSN" | sed -nE 's/.*\(tcp\)?\(([^)]*)\).*/\1/p')
+    if [ -z "$DB_ADDR" ]; then
+      echo "LATENCY_MS is set but E2E_MYSQL_DSN is not a tcp(host:port) DSN" >&2
+      exit 2
+    fi
+    go build -o bin/dblatency ./cmd/dblatency
+    bin/dblatency -listen "127.0.0.1:$LATENCY_PORT" -target "$DB_ADDR" -rtt "${LATENCY_MS}ms" \
+      > logs/dblatency.log 2>&1 &
+    LATENCY_PID=$!
+    CLEANUP_PIDS+=("$LATENCY_PID")
+    sleep 0.3
+    kill -0 "$LATENCY_PID" || { cat logs/dblatency.log; echo "dblatency died"; exit 1; }
+    E2E_MYSQL_DSN=$(printf '%s' "$E2E_MYSQL_DSN" | sed -E "s#\(tcp\)\([^)]*\)#(tcp)(127.0.0.1:$LATENCY_PORT)#")
+    export E2E_MYSQL_DSN
+    printf 'latency: +%sms RTT via 127.0.0.1:%s -> %s\n' "$LATENCY_MS" "$LATENCY_PORT" "$DB_ADDR"
+    printf 'DSN: %s\n' "$E2E_MYSQL_DSN"
+  fi
+fi
+
 step "1. 建表并随机写入老表 ($ROWS 行, 新表 100 张为空)"
 bin/e2e init -dist "$DIST" -rows "$ROWS" -users "$USERS" ${INIT_ARGS:-}
 
 step "2. 启动线上模拟: 持续 新增/修改 老表 + 事务双写新表"
 bin/e2e writer -dist "$DIST" -workers "$WORKERS" -insert-ratio "$INSERT_RATIO" -users "$USERS" > logs/writer.log 2>&1 &
 WRITER=$!
-trap 'kill -TERM $WRITER 2>/dev/null || true' EXIT
+CLEANUP_PIDS+=("$WRITER")
 sleep "$WARMUP"
 kill -0 "$WRITER" || { cat logs/writer.log; echo "writer died"; exit 1; }
 tail -n 2 logs/writer.log
@@ -53,7 +88,6 @@ bin/e2e reconcile -label run3 -insert "$INSERT_MODE" -batch "$BATCH" -page "$PAG
 step "5. 停机: 停止所有写入"
 kill -TERM "$WRITER"
 wait "$WRITER"
-trap - EXIT
 tail -n 1 logs/writer.log
 
 step "6. 一致性快照内逐行比对"
