@@ -9,6 +9,8 @@ import (
 // It is a data/configuration error, not transient. Rows are never moved/deleted.
 var ErrMisrouted = errors.New("mysqltable: misrouted row")
 
+var errInvalidValues = errors.New("mysqltable: invalid column values")
+
 // MisroutedError describes the row and both tables. It wraps ErrMisrouted so
 // callers can use errors.Is and errors.As after Run adds context.
 type MisroutedError struct {
@@ -22,6 +24,34 @@ func (e *MisroutedError) Error() string {
 }
 func (e *MisroutedError) Unwrap() error { return ErrMisrouted }
 
+func checkRoute[K comparable](r Router[K], k K) (string, error) {
+	t := r.Route(k)
+	for _, declared := range r.Tables() {
+		if declared == t {
+			return t, nil
+		}
+	}
+	return "", &MisroutedError{Key: k, Table: t, Expected: ""}
+}
+
+func checkRoutes[K comparable](r Router[K], keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	declared := r.Tables()
+	valid := make(map[string]struct{}, len(declared))
+	for _, t := range declared {
+		valid[t] = struct{}{}
+	}
+	for _, k := range keys {
+		t := r.Route(k)
+		if _, ok := valid[t]; !ok {
+			return &MisroutedError{Key: k, Table: t, Expected: ""}
+		}
+	}
+	return nil
+}
+
 func (p *Pair[T, K]) checkRouting(router Router[K], table string, rows []T) error {
 	for _, row := range rows {
 		k := p.cfg.Schema.Key(row)
@@ -31,4 +61,13 @@ func (p *Pair[T, K]) checkRouting(router Router[K], table string, rows []T) erro
 		}
 	}
 	return nil
+}
+
+func (p *Pair[T, K]) values(row T) ([]any, error) {
+	vals := p.cfg.Schema.Values(row)
+	if len(vals) != len(p.cfg.Schema.Columns) {
+		return nil, fmt.Errorf("%w: Schema.Values returned %d values for %d columns (key=%v)",
+			errInvalidValues, len(vals), len(p.cfg.Schema.Columns), p.cfg.Schema.Key(row))
+	}
+	return vals, nil
 }

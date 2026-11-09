@@ -42,3 +42,47 @@ func TestErrorCodeBoundaryNilAndWrapped(t *testing.T) {
 		t.Fatal("wrapped duplicate key must still be detected")
 	}
 }
+
+func TestErrorClassifierIgnoresPayloadSubstringsAndPermanentWrappers(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		dup  bool
+		trns bool
+	}{
+		{
+			name: "duplicate key whose key value contains deadlock errno",
+			err:  errors.New("Error 1062 (23000): Duplicate entry 'Error 1213: fake deadlock' for key 'PRIMARY'"),
+			dup:  true,
+			trns: false,
+		},
+		{
+			name: "duplicate key whose key value contains network substring",
+			err:  errors.New("Error 1062 (23000): Duplicate entry 'i/o timeout' for key 'PRIMARY'"),
+			dup:  true,
+			trns: false,
+		},
+		{
+			name: "missing table whose name contains network substring",
+			err:  errors.New("Error 1146 (42S02): Table 'db.unexpected EOF' doesn't exist"),
+			dup:  false,
+			trns: false,
+		},
+		{
+			name: "lock wait timeout whose payload mentions Error 1062",
+			err:  errors.New("Error 1205 (HY000): Lock wait timeout exceeded; context 'Error 1062: dup'"),
+			dup:  false,
+			trns: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsDuplicateKey(tc.err); got != tc.dup {
+				t.Errorf("IsDuplicateKey(%v) = %v, want %v", tc.err, got, tc.dup)
+			}
+			if got := IsTransient(tc.err); got != tc.trns {
+				t.Errorf("IsTransient(%v) = %v, want %v", tc.err, got, tc.trns)
+			}
+		})
+	}
+}

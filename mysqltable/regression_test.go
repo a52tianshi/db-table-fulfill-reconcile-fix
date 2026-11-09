@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/a52tianshi/db-table-fulfill-reconcile-fix"
 )
 
 type queryScript func(string, []driver.NamedValue) ([][]driver.Value, error)
@@ -26,12 +28,25 @@ func (scriptConn) Prepare(string) (driver.Stmt, error) {
 
 func (scriptConn) Close() error { return nil }
 func (scriptConn) Begin() (driver.Tx, error) {
-	return nil, fmt.Errorf("transaction not used by script")
+	return scriptTx{}, nil
 }
+func (scriptConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return scriptTx{}, nil
+}
+
+type scriptTx struct{}
+
+func (scriptTx) Commit() error   { return nil }
+func (scriptTx) Rollback() error { return nil }
 
 func (c scriptConn) QueryContext(_ context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	rows, err := c.query(q, args)
 	return &scriptRows{rows: rows}, err
+}
+
+func (c scriptConn) ExecContext(_ context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
+	_, err := c.query(q, args)
+	return driver.RowsAffected(1), err
 }
 
 type scriptRows struct {
@@ -173,4 +188,176 @@ func TestOldSideScanAlsoRejectsWrongShard(t *testing.T) {
 	if _, _, err := p.Old().ScanPage(context.Background(), nil, 3); !errors.Is(err, ErrMisrouted) {
 		t.Fatalf("%v", err)
 	}
+}
+
+func TestTxUpdateAndInsertRejectWrongValuesLength(t *testing.T) {
+	ctx := context.Background()
+	t.Run("update too few values returns error without panic", func(t *testing.T) {
+		var executed int
+		p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
+			executed++
+			return nil, nil
+		})
+		p.cfg.Schema.Values = func(o order) []any { return []any{o.ID} } // 1 value for 2 columns
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Update panicked instead of returning error: %v", r)
+			}
+		}()
+		err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+			return tx.Update(ctx, order{ID: 1, UserID: 2})
+		})
+		if err == nil {
+			t.Fatal("expected error when Values returns fewer items than Columns")
+		}
+		if executed != 0 {
+			t.Fatalf("expected 0 SQL executions, got %d", executed)
+		}
+	})
+
+	t.Run("update too many values returns error instead of silent truncation", func(t *testing.T) {
+		var executed int
+		p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
+			executed++
+			return nil, nil
+		})
+		p.cfg.Schema.Values = func(o order) []any { return []any{o.ID, o.UserID, "extra"} } // 3 values for 2 columns
+		err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+			return tx.Update(ctx, order{ID: 1, UserID: 2})
+		})
+		if err == nil {
+			t.Fatal("expected error when Values returns more items than Columns")
+		}
+		if executed != 0 {
+			t.Fatalf("expected 0 SQL executions, got %d", executed)
+		}
+	})
+
+	t.Run("insert rejects mismatched values before multi-row shift", func(t *testing.T) {
+		var executed int
+		p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
+			executed++
+			return nil, nil
+		})
+		p.cfg.InsertChunk = 2
+		// Row 1 returns 3 values, Row 2 returns 1 value -> total 4 args for 2x2 placeholders!
+		p.cfg.Schema.Values = func(o order) []any {
+			if o.ID == 1 {
+				return []any{o.ID, o.UserID, int64(999)}
+			}
+			return []any{o.UserID}
+		}
+		err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+			return tx.Insert(ctx, []order{{ID: 1, UserID: 1}, {ID: 2, UserID: 1}})
+		})
+		if err == nil {
+			t.Fatal("expected error when Values length mismatches Columns in Insert")
+		}
+		if executed != 0 {
+			t.Fatalf("expected 0 SQL executions, got %d", executed)
+		}
+	})
+}
+
+func TestInsertSortsByKeyLessBeforeChunking(t *testing.T) {
+	ctx := context.Background()
+	var chunks [][]int64
+	p := scriptPair(t, func(q string, args []driver.NamedValue) ([][]driver.Value, error) {
+		if !strings.HasPrefix(q, "INSERT INTO") {
+			t.Fatalf("unexpected query: %s", q)
+		}
+		var ids []int64
+		for i := 0; i < len(args); i += 2 {
+			ids = append(ids, args[i].Value.(int64))
+		}
+		chunks = append(chunks, ids)
+		return nil, nil
+	})
+	p.cfg.InsertChunk = 2
+	rows := []order{{ID: 10, UserID: 1}, {ID: 2, UserID: 1}, {ID: 9, UserID: 1}, {ID: 1, UserID: 1}}
+	before := append([]order(nil), rows...)
+	err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+		return tx.Insert(ctx, rows)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]int64{{1, 2}, {9, 10}}
+	if !reflect.DeepEqual(chunks, want) {
+		t.Fatalf("Insert key order across chunks = %v, want %v", chunks, want)
+	}
+	if !reflect.DeepEqual(rows, before) {
+		t.Fatalf("Insert must not mutate caller slice: %v", rows)
+	}
+}
+
+func TestRouteOutsideTablesRejectedAcrossOperations(t *testing.T) {
+	ctx := context.Background()
+	var queries int
+	p := scriptPair(t, func(string, []driver.NamedValue) ([][]driver.Value, error) {
+		queries++
+		return nil, nil
+	})
+	p.cfg.New = RouterFunc[key]([]string{"orders_new_00", "orders_new_01"}, func(k key) string {
+		return "orders_new_99" // not in Tables()
+	})
+	if _, err := p.New().Lookup(ctx, []key{{ID: 1, UserID: 1}}); !errors.Is(err, ErrMisrouted) {
+		t.Fatalf("Lookup: want ErrMisrouted, got %v", err)
+	}
+	err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+		_, _, err := tx.Lock(ctx, []key{{ID: 1, UserID: 1}})
+		return err
+	})
+	if !errors.Is(err, ErrMisrouted) {
+		t.Fatalf("Lock: want ErrMisrouted, got %v", err)
+	}
+	err = p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+		return tx.Insert(ctx, []order{{ID: 1, UserID: 1}})
+	})
+	if !errors.Is(err, ErrMisrouted) {
+		t.Fatalf("Insert: want ErrMisrouted, got %v", err)
+	}
+	err = p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+		return tx.Update(ctx, order{ID: 1, UserID: 1})
+	})
+	if !errors.Is(err, ErrMisrouted) {
+		t.Fatalf("Update: want ErrMisrouted, got %v", err)
+	}
+	// Old.Lookup consumes 1 query in Lock before New.Lock fails; New must execute 0 queries.
+	if queries != 1 {
+		t.Fatalf("expected only Old lock query before New route check failed, got %d queries", queries)
+	}
+}
+
+func TestCrossSideCursorAndZeroLimitRejected(t *testing.T) {
+	ctx := context.Background()
+	p := scriptPair(t, func(q string, args []driver.NamedValue) ([][]driver.Value, error) {
+		if strings.Contains(q, "DESC LIMIT 1") {
+			return [][]driver.Value{{int64(10), int64(0)}}, nil
+		}
+		if len(args) > 0 && args[len(args)-1].Value == int64(0) {
+			return nil, nil // SELECT ... LIMIT 0 returns 0 rows
+		}
+		return [][]driver.Value{{int64(1), int64(0)}}, nil
+	})
+	t.Run("zero limit returns error without panic", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("ScanPage(limit=0) panicked: %v", r)
+			}
+		}()
+		if _, _, err := p.Old().ScanPage(ctx, nil, 0); err == nil {
+			t.Fatal("ScanPage with limit=0 must return error, not nil")
+		}
+	})
+	t.Run("cursor from New rejected by Old", func(t *testing.T) {
+		_, cur, err := p.New().ScanPage(ctx, nil, 2)
+		if err != nil || cur == nil {
+			t.Fatalf("New.ScanPage: cur=%v err=%v", cur, err)
+		}
+		// Passing a cursor from New (table orders_new_01) to Old (table orders_old) must fail.
+		if _, _, err := p.Old().ScanPage(ctx, cur, 2); err == nil {
+			t.Fatal("expected foreign cursor error when passing New cursor to Old.ScanPage")
+		}
+	})
 }

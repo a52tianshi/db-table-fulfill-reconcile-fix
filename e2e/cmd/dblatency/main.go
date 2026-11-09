@@ -44,20 +44,31 @@ func main() {
 			log.Fatalf("accept: %v", err)
 		}
 		go func() {
-			defer client.Close()
 			server, err := net.Dial("tcp", *target)
 			if err != nil {
+				client.Close()
 				log.Printf("dial %s: %v", *target, err)
 				return
 			}
-			defer server.Close()
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); copyDelayed(server, client, oneWay, *jitter) }()
-			go func() { defer wg.Done(); copyDelayed(client, server, oneWay, *jitter) }()
-			wg.Wait()
+			proxyConn(client, server, oneWay, *jitter)
 		}()
 	}
+}
+
+func proxyConn(client, server net.Conn, oneWay, jitter time.Duration) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer server.Close()
+		copyDelayed(server, client, oneWay, jitter)
+	}()
+	go func() {
+		defer wg.Done()
+		defer client.Close()
+		copyDelayed(client, server, oneWay, jitter)
+	}()
+	wg.Wait()
 }
 
 // copyDelayed forwards chunks from src to dst, sleeping before each write so the

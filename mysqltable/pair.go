@@ -80,6 +80,9 @@ func byTable[K comparable](r Router[K], keys []K) ([]string, map[string][]K) {
 
 // fetch runs IN queries (chunked by InChunk) for keys on one side.
 func (p *Pair[T, K]) fetch(ctx context.Context, q querier, r Router[K], keys []K, lock bool) (map[K]T, error) {
+	if err := checkRoutes(r, keys); err != nil {
+		return nil, err
+	}
 	out := make(map[K]T, len(keys))
 	tables, groups := byTable(r, keys)
 	for _, t := range tables {
@@ -118,22 +121,26 @@ func (s source[T, K]) Lookup(ctx context.Context, keys []K) (map[K]T, error) {
 	return s.p.fetch(ctx, s.p.cfg.DB, s.r, keys, false)
 }
 
-// scanCursor: table index, that table's high-water key (nil = not started)
-// and the last key returned (nil = first page).
+// scanCursor: table index, table name, that table's high-water key (nil = not
+// started) and the last key returned (nil = first page).
 type scanCursor struct {
 	table    int
+	name     string
 	hw, last any
 }
 
 func (s source[T, K]) ScanPage(ctx context.Context, c reconcile.Cursor, limit int) ([]T, reconcile.Cursor, error) {
+	if limit <= 0 {
+		return nil, nil, fmt.Errorf("mysqltable: ScanPage limit must be > 0, got %d", limit)
+	}
+	p, schema, tables := s.p, s.p.cfg.Schema, s.r.Tables()
 	var cur scanCursor
 	if c != nil {
 		var ok bool
-		if cur, ok = c.(scanCursor); !ok {
+		if cur, ok = c.(scanCursor); !ok || cur.table < 0 || cur.table >= len(tables) || tables[cur.table] != cur.name {
 			return nil, nil, fmt.Errorf("mysqltable: foreign cursor %T", c)
 		}
 	}
-	p, schema, tables := s.p, s.p.cfg.Schema, s.r.Tables()
 	for cur.table < len(tables) {
 		t := tables[cur.table]
 		if cur.hw == nil {
@@ -169,9 +176,9 @@ func (s source[T, K]) ScanPage(ctx context.Context, c reconcile.Cursor, limit in
 		var next reconcile.Cursor
 		switch {
 		case len(rows) == limit:
-			next = scanCursor{cur.table, cur.hw, schema.KeyValue(schema.Key(rows[len(rows)-1]))}
+			next = scanCursor{cur.table, t, cur.hw, schema.KeyValue(schema.Key(rows[len(rows)-1]))}
 		case cur.table+1 < len(tables):
-			next = scanCursor{table: cur.table + 1}
+			next = scanCursor{table: cur.table + 1, name: tables[cur.table+1]}
 		}
 		return rows, next, nil
 	}
@@ -219,14 +226,22 @@ func (t tx[T, K]) Insert(ctx context.Context, rows []T) error {
 		keys[i] = schema.Key(v)
 		byKey[keys[i]] = v
 	}
+	if err := checkRoutes(t.p.cfg.New, keys); err != nil {
+		return err
+	}
 	tables, groups := byTable(t.p.cfg.New, keys)
 	for _, table := range tables {
 		ks := groups[table]
+		sort.SliceStable(ks, func(i, j int) bool { return schema.KeyLess(ks[i], ks[j]) })
 		for len(ks) > 0 {
 			n := min(len(ks), t.p.cfg.InsertChunk)
 			args := make([]any, 0, n*t.p.q.nCols)
 			for _, k := range ks[:n] {
-				args = append(args, schema.Values(byKey[k])...)
+				vals, err := t.p.values(byKey[k])
+				if err != nil {
+					return err
+				}
+				args = append(args, vals...)
 			}
 			if _, err := t.tx.ExecContext(ctx, t.p.q.insert(table, n), args...); err != nil {
 				if t.p.cfg.IsDuplicate(err) {
@@ -243,7 +258,14 @@ func (t tx[T, K]) Insert(ctx context.Context, rows []T) error {
 func (t tx[T, K]) Update(ctx context.Context, row T) error {
 	schema := t.p.cfg.Schema
 	k := schema.Key(row)
-	vals := schema.Values(row)
+	table, err := checkRoute(t.p.cfg.New, k)
+	if err != nil {
+		return err
+	}
+	vals, err := t.p.values(row)
+	if err != nil {
+		return err
+	}
 	args := make([]any, 0, len(vals))
 	for i, c := range schema.Columns {
 		if c != schema.KeyColumn {
@@ -251,7 +273,6 @@ func (t tx[T, K]) Update(ctx context.Context, row T) error {
 		}
 	}
 	args = append(args, schema.KeyValue(k))
-	table := t.p.cfg.New.Route(k)
 	if _, err := t.tx.ExecContext(ctx, t.p.q.update(table), args...); err != nil {
 		return fmt.Errorf("%s: %w", table, err)
 	}

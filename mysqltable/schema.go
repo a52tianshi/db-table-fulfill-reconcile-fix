@@ -140,29 +140,49 @@ func checkIdent(name string) error {
 
 func quote(name string) string { return "`" + name + "`" }
 
+// firstMySQLErrno extracts the numeric code from the first go-sql-driver/mysql
+// "Error <digits><delimiter>" header in msg. Matching only the first header
+// prevents user data in a Duplicate entry '...' payload from spoofing another
+// MySQL error code (e.g. 'Error 1213: ...' inside Error 1062).
+func firstMySQLErrno(msg string) string {
+	const prefix = "Error "
+	for i := 0; i < len(msg); {
+		j := strings.Index(msg[i:], prefix)
+		if j < 0 {
+			return ""
+		}
+		start := i + j + len(prefix)
+		end := start
+		for end < len(msg) && msg[end] >= '0' && msg[end] <= '9' {
+			end++
+		}
+		if end > start {
+			if end == len(msg) {
+				return msg[start:end]
+			}
+			switch msg[end] {
+			case ' ', ':', '(', ',', ']':
+				return msg[start:end]
+			}
+		}
+		i = start
+	}
+	return ""
+}
+
 // mysqlErrno matches the go-sql-driver/mysql message format "Error 1213 ...".
 // The code must end at a delimiter: "Error 1062" must not match "Error 10620".
 func mysqlErrno(err error, codes ...string) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
+	got := firstMySQLErrno(err.Error())
+	if got == "" {
+		return false
+	}
 	for _, c := range codes {
-		needle := "Error " + c
-		for i := 0; ; {
-			j := strings.Index(msg[i:], needle)
-			if j < 0 {
-				break
-			}
-			end := i + j + len(needle)
-			if end == len(msg) {
-				return true
-			}
-			switch msg[end] {
-			case ' ', ':', '(', ',', ']':
-				return true
-			}
-			i = end
+		if got == c {
+			return true
 		}
 	}
 	return false
@@ -176,16 +196,21 @@ func IsDuplicateKey(err error) bool { return err != nil && mysqlErrno(err, "1062
 // (2006, 2013), too many connections (1040), and broken connections.
 // Anything else (syntax, missing table, duplicate key...) is not retried.
 func IsTransient(err error) bool {
-	if err == nil || errors.Is(err, ErrMisrouted) {
+	if err == nil || errors.Is(err, ErrMisrouted) || errors.Is(err, errInvalidValues) {
 		return false
 	}
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
 		return true
 	}
-	if mysqlErrno(err, "1213", "1205", "2006", "2013", "1040") {
-		return true
-	}
 	msg := err.Error()
+	if code := firstMySQLErrno(msg); code != "" {
+		switch code {
+		case "1213", "1205", "2006", "2013", "1040":
+			return true
+		default:
+			return false
+		}
+	}
 	for _, s := range []string{"invalid connection", "broken pipe", "connection reset", "connection refused", "i/o timeout", "unexpected EOF"} {
 		if strings.Contains(msg, s) {
 			return true
