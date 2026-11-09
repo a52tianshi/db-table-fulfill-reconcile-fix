@@ -56,7 +56,7 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 
 第 4 步的 `suspected` 可以大于 0：扫描老表和查新表之间，这一行如果被双写更新了，第一次比对会疑似不同，事务内重读后又相等，计入 `stale`。这是预期行为，不算失败。
 
-双写语义：模拟线上代码，`UPDATE` 新表时若该行尚未迁移则影响 0 行，交由框架补齐。写入方与库的 Repairer 都按 老表 → 新表 的顺序加行锁，使用 READ COMMITTED，死锁/锁等待超时会重试。
+双写语义：模拟线上代码，`UPDATE` 新表时若该行尚未迁移则影响 0 行，交由框架补齐。写入方与库的 Repairer 都按 老表 → 新表 的顺序加行锁，使用 READ COMMITTED。**写入方本身不重试**：死锁/锁等待超时会让该事务回滚并计入 `failed`（库侧的 Repairer 才按 `Retry` 策略重试）。
 
 ## 运行
 
@@ -77,7 +77,7 @@ bin/e2e reconcile -fail-rate 1 -retry-attempts 3     # 每次调用都失败: �
 bin/e2e reconcile -progress-every 500ms              # 进度日志间隔（0 = 不输出进度）
 ```
 
-`run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始和提交前，按 2% 概率注入一个伪造的死锁错误（`internal/store/chaos.go`），验证每一步都会被重试。报告中 `retries` = `injected` + MySQL 真实发生的可重试错误（死锁等，实测一直是 0），所以两者应当相等。设为 `FAIL_RATE=0` 可以关闭注入。
+`run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始、提交前以及通知回调前，按 2% 概率注入一个伪造的可重试错误（`1213` 为主，另有 `1205`/`2006`/`2013`，见 `internal/store/chaos.go`），验证每一步都会被重试。运行输出按阶段给出计数：`injected=N (scan=… lookup=… txBegin=… txPreCommit=… notify=…)`。报告中 `retries` = `injected` + MySQL 真实发生的可重试错误（死锁等，实测一直是 0），所以两者应当相等。设为 `FAIL_RATE=0` 可以关闭注入。
 
 `init` 会 **DROP 并重建** DSN 指定库中的上述 101 张表。writer 日志在 `logs/writer.log`。
 

@@ -121,7 +121,7 @@ flowchart LR
 | `Insert` | `InsertBatchLocked` / `InsertBatchSnapshot` / `InsertPerRow` | 缺失行的插入方式，见第 4 节。只告警时也必须填 |
 | `ExtraCheck` | `CheckExtra` / `SkipExtra` | 是否反向扫描新表，找出只在新表存在的行 |
 | `Repairer` | `pair.Repairer()` | |
-| `Notifier` | `r.LogNotifier{W: os.Stderr}` 或自己实现 | 先计入整批已提交结果，再逐条回调（包括已修复的）。回调失败会按 `Retry` 重试并最终停止 Run；通知可能重复或遗漏，无可靠交付保证 |
+| `Notifier` | `r.LogNotifier{W: os.Stderr}`（默认只打未修复项；要含已修复行需设 `Fixed: true`）或自己实现 | 先计入整批已提交结果，再逐条回调。回调失败会按 `Retry` 重试并最终停止 Run；通知可能重复或遗漏，无可靠交付保证 |
 | `Progress` | `r.LogProgress(os.Stderr, 10*time.Second)` / `r.NoProgress` / 自己的函数 | 进度回调，见 ⑥ |
 | `ScanPageSize` | 1000 | 每条扫描 SQL 读多少行 |
 | `BatchSize` | 1000 | 攒多少行做一次另一侧的批量查询 |

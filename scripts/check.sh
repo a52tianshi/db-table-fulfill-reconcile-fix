@@ -43,7 +43,7 @@ integration() {
   # Guard against renamed or deleted tests: a run that executes fewer than the
   # 11 integration tests is not the evidence this gate claims to provide.
   local passed
-  passed=$(grep -c -- '--- PASS:' "$log" || true)
+  passed=$(grep -c -- '^--- PASS:' "$log" || true)
   if [[ "${passed:-0}" -lt 11 ]]; then
     printf 'integration FAIL: only %s tests passed (expected >= 11)\n' "${passed:-0}" >&2
     return 1

@@ -102,6 +102,14 @@ func Struct[T any](ignore []string, custom ...Field[T]) (Comparator[T], error) {
 		if len(sf.Index) != 1 {
 			return nil, fmt.Errorf("Struct: %q must name a top-level field; promoted fields are not supported", f.Name)
 		}
+		if _, dup := over[f.Name]; dup {
+			return nil, fmt.Errorf("Struct: field %q appears twice in custom", f.Name)
+		}
+		if skip[f.Name] {
+			// Silently dropping the custom comparator would compare nothing and
+			// report the field as identical forever.
+			return nil, fmt.Errorf("Struct: field %q is in both ignore and custom", f.Name)
+		}
 		over[f.Name] = f
 	}
 	type field struct {

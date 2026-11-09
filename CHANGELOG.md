@@ -34,7 +34,7 @@
 - 运维文档补充 DSN `readTimeout` / `writeTimeout` 与 `innodb_lock_wait_timeout` 要求（库本身无单步超时）。
 - `mysqlErrno` 校验错误码的数字右边界：`Error 10620` 不再被误判为 `1062`（重复键）、`Error 12130` 不再被误判为 `1213`（死锁）。
 - CI：同一 PR 的重复推送取消旧运行（`concurrency`），e2e 改用 `PAGE=50 BATCH=100` 覆盖跨页游标与多批事务；`push` 触发限定在 `main`，避免 PR 双跑。
-- 补测：退避等待期间的上下文取消、快照插入的冲突重做上限（≤4 轮后报 `ErrConflict`）与冲突后恢复；覆盖率 86.2% → 87.1%。
+- 补测：退避等待期间的上下文取消、快照插入的冲突重做上限（首轮之外最多 3 轮，即最多 4 次锁定复核后报 `ErrConflict`）与冲突后恢复；覆盖率 86.2% → 87.1%。
 - `docs/interface-contracts.md` 增加错误分类的英文版（值班人员按错误码处置不需要中文）。
 - CI 首次在 GitHub Actions 实跑通过（run 42596345410，Go 1.22.x / 1.25.4 双矩阵 + MySQL 8.4 service + 跨页 e2e）。
 

@@ -180,3 +180,17 @@ func TestStructRejectsPromotedFieldConfiguration(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+// A field listed in both ignore and custom used to have its comparator silently
+// dropped: the field was skipped and reported equal forever.
+func TestStructRejectsIgnoreAndCustomOverlap(t *testing.T) {
+	if _, err := r.Struct[order]([]string{"Amount"}, r.Field[order]{Name: "Amount", Equal: func(a, b order) bool { return true }}); err == nil {
+		t.Fatal("expected an error when a field is in both ignore and custom")
+	}
+	if _, err := r.Struct[order](nil,
+		r.Field[order]{Name: "ID", Equal: func(a, b order) bool { return true }},
+		r.Field[order]{Name: "ID", Equal: func(a, b order) bool { return false }},
+	); err == nil {
+		t.Fatal("expected an error for a duplicated custom field")
+	}
+}
