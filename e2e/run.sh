@@ -27,7 +27,7 @@ step() { printf '\n==== %s ====\n' "$*"; }
 CLEANUP_PIDS=()
 cleanup() {
   local pid
-  for pid in "${CLEANUP_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  for pid in ${CLEANUP_PIDS[@]+"${CLEANUP_PIDS[@]}"}; do kill -TERM "$pid" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 
@@ -40,7 +40,7 @@ if [ -n "${LATENCY_MS:-}" ]; then
   esac
   if [ "$LATENCY_MS" -gt 0 ]; then
     LATENCY_PORT=${LATENCY_PORT:-3307}
-    DB_ADDR=$(printf '%s' "$E2E_MYSQL_DSN" | sed -nE 's/.*\(tcp\)?\(([^)]*)\).*/\1/p')
+    DB_ADDR=$(printf '%s' "$E2E_MYSQL_DSN" | sed -nE 's/.*tcp\(([^)]*)\).*/\1/p')
     if [ -z "$DB_ADDR" ]; then
       echo "LATENCY_MS is set but E2E_MYSQL_DSN is not a tcp(host:port) DSN" >&2
       exit 2
