@@ -34,7 +34,7 @@
 
 ## 未覆盖分支与风险 / Gaps and risk
 
-- **覆盖分母边界**：`mysqltable.InTx`、Lock、Insert、Update 在根 module 的覆盖报告中为 0%；独立 e2e module 的真实 MySQL 集成/e2e 已通过，但不计入该覆盖率分母。根包的 memtable 事务通过本身不证明 MySQL 隔离级别、网络、锁或驱动行为。远程 CI 未执行。
+- **覆盖分母边界**：`mysqltable.InTx`、Lock、Insert、Update 在根 module 的覆盖报告中为 0%；独立 e2e module 的真实 MySQL 集成/e2e 已通过，但不计入该覆盖率分母。根包的 memtable 事务通过本身不证明 MySQL 隔离级别、网络、锁或驱动行为。远程 CI 已执行：run 42596345410，Go 1.22.x / 1.25.4 双 job 均通过。
 - **高风险、需要独立故障演练**：实际 COMMIT 响应丢失、数据库故障转移、进程/磁盘故障尚未注入。新增 mock 只在真实 memtable 提交之后返回错误，验证引擎恢复契约；现有 Chaos 只模拟 SQL 前或 COMMIT 前失败，不能代表实际网络断连。
 - **中风险**：ScanPage 57.6%，未覆盖全部查询/解码错误、游标与空/尾页组合；根模块 SQL 测试驱动不是数据库。本轮真实分页、高水位集成测试与 30000 行 skew 已通过，包含 999/1000/1001 等固定分布；仍不等于穷尽分页与错误组合。
 - **已补测（v0.2.2）**：回退期间的取消（`TestCancelDuringRetryBackoffStopsImmediately`）、快照插入的冲突重做轮次（`TestPersistentConflictIsBoundedAndReported` / `TestConflictRecoversWithinRounds`）现已覆盖；`retry.retryable` 达 100%，`retry.do` 94.4%。

@@ -353,3 +353,26 @@ E2E PASS
 ```
 
 集成门禁复跑：`--- PASS:` 计数 11，满足 `check.sh integration` 的硬性下限。
+
+### 10.8 GitHub Actions 实跑 / Remote CI
+
+代码已推送到 `main`（commit `d763957`，tag `v0.2.0`–`v0.2.3`），触发真实 CI：
+
+```sh
+gh run watch 42596345410 -R a52tianshi/db-table-fulfill-reconcile-fix --exit-status
+```
+
+```text
+✓ Build both modules
+✓ Vet both modules
+✓ Race tests (no database)
+✓ Lint (gofmt and shell syntax)
+✓ MySQL integration (skip is failure)
+✓ Concurrent writer and independent verification (cross-page)
+checks (1.22.x)   success  09:49:37Z → 09:50:59Z
+checks (1.25.4)   success  09:49:37Z → 09:51:04Z
+```
+
+- Run: https://github.com/a52tianshi/db-table-fulfill-reconcile-fix/actions/runs/42596345410
+- 结论：`success`。MySQL 8.4 service 容器、集成测试 Skip 门禁、`PAGE=50 BATCH=100` 的跨页 e2e 都在 Actions 上真实执行过。
+- 唯一非阻塞告警：`actions/checkout@v4` 与 `actions/setup-go@v5` 使用 Node 20，被 runner 强制以 Node 24 运行；属上游弃用提示，不影响结果。

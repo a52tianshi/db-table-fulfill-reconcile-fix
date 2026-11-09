@@ -24,6 +24,7 @@
 - CI：同一 PR 的重复推送取消旧运行（`concurrency`），e2e 改用 `PAGE=50 BATCH=100` 覆盖跨页游标与多批事务；`push` 触发限定在 `main`，避免 PR 双跑。
 - 补测：退避等待期间的上下文取消、快照插入的冲突重做上限（≤4 轮后报 `ErrConflict`）与冲突后恢复；覆盖率 86.2% → 86.5%。
 - `docs/interface-contracts.md` 增加错误分类的英文版（值班人员按错误码处置不需要中文）。
+- CI 首次在 GitHub Actions 实跑通过（run 42596345410，Go 1.22.x / 1.25.4 双矩阵 + MySQL 8.4 service + 跨页 e2e）。
 
 ### Migration note / 迁移说明
 
