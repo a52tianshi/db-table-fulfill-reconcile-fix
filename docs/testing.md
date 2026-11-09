@@ -25,19 +25,20 @@
 
 | 包 / Package | 已执行 / 总语句 | 覆盖率 |
 |---|---|---|
-| reconcile 根包 | 373 / 393 | 94.9% |
+| reconcile 根包 | 376 / 393 | 95.7% |
 | memtable | 85 / 93 | 91.4% |
-| mysqltable | 159 / 230 | 69.1% |
-| 合计 | 617 / 716 | 86.2% |
+| mysqltable | 168 / 241 | 69.7% |
+| 合计 | 629 / 727 | 86.5% |
 
-`go tool cover -func` 的合计为 86.2%。基线默认逐包口径为根包 94.1%、memtable 49.5%、mysqltable 69.1%；它与上表的跨包口径不同，不用二者直接计算“提升幅度”。e2e 是独立 module，未包含在上述分母；新增 store 数据分布测试不代表覆盖 CLI、数据库写入或 Chaos，CLI 仍无原有测试。
+`go tool cover -func` 的合计为 86.5%（相对 v0.2.0 提升 0.3pp，来自新增的冲突重做与退避取消用例）。基线默认逐包口径为根包 94.1%、memtable 49.5%、mysqltable 69.1%；它与上表的跨包口径不同，不用二者直接计算“提升幅度”。e2e 是独立 module，未包含在上述分母；新增 store 数据分布测试不代表覆盖 CLI、数据库写入或 Chaos，CLI 仍无原有测试。
 
 ## 未覆盖分支与风险 / Gaps and risk
 
 - **覆盖分母边界**：`mysqltable.InTx`、Lock、Insert、Update 在根 module 的覆盖报告中为 0%；独立 e2e module 的真实 MySQL 集成/e2e 已通过，但不计入该覆盖率分母。根包的 memtable 事务通过本身不证明 MySQL 隔离级别、网络、锁或驱动行为。远程 CI 未执行。
 - **高风险、需要独立故障演练**：实际 COMMIT 响应丢失、数据库故障转移、进程/磁盘故障尚未注入。新增 mock 只在真实 memtable 提交之后返回错误，验证引擎恢复契约；现有 Chaos 只模拟 SQL 前或 COMMIT 前失败，不能代表实际网络断连。
 - **中风险**：ScanPage 57.6%，未覆盖全部查询/解码错误、游标与空/尾页组合；根模块 SQL 测试驱动不是数据库。本轮真实分页、高水位集成测试与 30000 行 skew 已通过，包含 999/1000/1001 等固定分布；仍不等于穷尽分页与错误组合。
-- **中风险**：根包 recheckTx 88.6%、retry.do 83.3%，仍有缺失双端、Lock/Insert 中途失败、取消恰逢退避等待等组合未覆盖。现有失败及回滚测试保护主要契约，但不等于完整故障矩阵。
+- **已补测（v0.2.2）**：回退期间的取消（`TestCancelDuringRetryBackoffStopsImmediately`）、快照插入的冲突重做轮次（`TestPersistentConflictIsBoundedAndReported` / `TestConflictRecoversWithinRounds`）现已覆盖；`retry.retryable` 达 100%，`retry.do` 94.4%。
+- **中风险**：仍缺双端同时失败、Lock/Insert 在事务中途失败（已写入后回滚）的组合。现有失败及回滚测试保护主要契约，但不等于完整故障矩阵。
 - **较低风险**：自定义 RouterFunc 路径、memtable.Delete、部分枚举默认 String、无操作回调和永久错误 Unwrap 分支未覆盖；分别涉及自定义路由接入、测试工具及诊断文字。字符串主键 collation 和业务自定义 adapter 仍需业务方专项验证。
 - race 检测只覆盖本次测试中执行到的并发；引擎本身串行，不证明用户回调、双写方或多个独立任务之间没有竞争。
 
