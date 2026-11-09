@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# 同一个 PR 的重复推送取消旧运行，避免 MySQL service 被重复拉起。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -47,5 +53,7 @@ jobs:
         run: ./scripts/check.sh lint
       - name: MySQL integration (skip is failure)
         run: ./scripts/check.sh integration
-      - name: Concurrent writer and independent verification
-        run: DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
+      - name: Concurrent writer and independent verification (cross-page)
+        # PAGE/BATCH 缩小到 50/100，保证 e2e 覆盖分页游标跨页与多批事务，
+        # 而不是每张分表一页、每轮一批。
+        run: DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 PAGE=50 BATCH=100 ./e2e/run.sh

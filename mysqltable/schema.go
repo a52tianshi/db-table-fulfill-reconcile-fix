@@ -108,11 +108,28 @@ func checkIdent(name string) error {
 func quote(name string) string { return "`" + name + "`" }
 
 // mysqlErrno matches the go-sql-driver/mysql message format "Error 1213 ...".
+// The code must end at a delimiter: "Error 1062" must not match "Error 10620".
 func mysqlErrno(err error, codes ...string) bool {
+	if err == nil {
+		return false
+	}
 	msg := err.Error()
 	for _, c := range codes {
-		if strings.Contains(msg, "Error "+c) {
-			return true
+		needle := "Error " + c
+		for i := 0; ; {
+			j := strings.Index(msg[i:], needle)
+			if j < 0 {
+				break
+			}
+			end := i + j + len(needle)
+			if end == len(msg) {
+				return true
+			}
+			switch msg[end] {
+			case ' ', ':', '(', ',', ']':
+				return true
+			}
+			i = end
 		}
 	}
 	return false

@@ -20,6 +20,8 @@
 - 文档撤回 `func(error) bool { return true }` 的重试建议，改为 `mysqltable.IsTransient`，避免永久错误（错片、foreign cursor）被反复重试。
 - 契约补充快照模式丢应答的重试路径（盲插 → 1062 → 锁定复核），并声明自定义 `Tx.Insert` 不得实现为 upsert。
 - 运维文档补充 DSN `readTimeout` / `writeTimeout` 与 `innodb_lock_wait_timeout` 要求（库本身无单步超时）。
+- `mysqlErrno` 校验错误码的数字右边界：`Error 10620` 不再被误判为 `1062`（重复键）、`Error 12130` 不再被误判为 `1213`（死锁）。
+- CI：同一 PR 的重复推送取消旧运行（`concurrency`），e2e 改用 `PAGE=50 BATCH=100` 覆盖跨页游标与多批事务；`push` 触发限定在 `main`，避免 PR 双跑。
 
 ### Migration note / 迁移说明
 

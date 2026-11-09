@@ -330,3 +330,26 @@ total:  (statements)  86.2%
 ```
 
 变异后测试失败、还原后通过 —— 说明它确实锁住了"快照模式丢应答不得重插"这条契约。
+
+### 10.7 第二轮合并项 / Second merge
+
+| 改动 | 位置 | 证据 |
+|---|---|---|
+| 错误码数字右边界（`Error 10620` 不再等于 `1062`） | `mysqltable/schema.go` | `TestErrorCodeBoundary`；变异回 `strings.Contains` 后该测试失败 |
+| 契约补充快照模式丢应答的计数口径（`Inserted`/`Updated` 偏小，`Consistent()` 不受影响） | `docs/interface-contracts.md` | 文档 |
+| CI：`concurrency` 取消旧运行、`push` 仅 `main`、e2e 改 `PAGE=50 BATCH=100` | `.github/workflows/ci.yml` | 本地按同一命令跑通（见下） |
+
+```sh
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_ci" DIST=uniform ROWS=2000 USERS=1000 \
+  WARMUP=2 GAP=3 PAGE=50 BATCH=100 ./e2e/run.sh
+```
+
+```text
+[writer] stopped inserts=38797 updates=91027 failed=0
+[verify] old=40797 new=40797 checked=40797 missing=0 different=0 misrouted=0 extra=0 | 236ms
+[verify] PASS: old and new tables are identical
+
+E2E PASS
+```
+
+集成门禁复跑：`--- PASS:` 计数 11，满足 `check.sh integration` 的硬性下限。
