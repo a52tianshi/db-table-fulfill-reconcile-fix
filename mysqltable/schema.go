@@ -69,6 +69,7 @@ func (c *PairConfig[T, K]) validate() error {
 	check(c.InsertChunk > 0, "InsertChunk must be > 0, got %d", c.InsertChunk)
 	check(c.IsDuplicate != nil, "IsDuplicate is required")
 	check(len(s.Columns) > 0, "Schema.Columns is required")
+	check(len(s.Columns) > 1, "Schema.Columns must list at least one non-key column: with only the key column, UPDATE renders \"SET WHERE\"")
 	check(s.Key != nil, "Schema.Key is required")
 	check(s.KeyValue != nil, "Schema.KeyValue is required")
 	check(s.KeyLess != nil, "Schema.KeyLess is required")

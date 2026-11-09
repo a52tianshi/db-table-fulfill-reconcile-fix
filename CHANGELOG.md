@@ -1,6 +1,17 @@
 # Changelog / 变更记录
 
-## Unreleased — 发布准备 / Release preparation
+## 版本索引 / Releases
+
+| tag | 内容 |
+|---|---|
+| `v0.2.0` | 合入三方评审裁决项：错误链、最小权限、丢应答测试、e2e 通知注入、门禁 |
+| `v0.2.1` | 错误码数字右边界；CI `concurrency` 与跨页 e2e |
+| `v0.2.2` | 补测冲突重做与退避取消；覆盖率 86.5% |
+| `v0.2.3` | 错误分类英文版 |
+| `v0.2.4` | 回填 GitHub Actions 实跑结果 |
+| `v0.3.0` | `NewPair` 校验收紧（nil route / 重复表名 / 空路由） |
+
+以下小节是 `v0.2.0`–`v0.3.0` 的合并记录（同一天发布，未按 tag 拆节）。
 
 ### Added
 
@@ -23,13 +34,17 @@
 - 运维文档补充 DSN `readTimeout` / `writeTimeout` 与 `innodb_lock_wait_timeout` 要求（库本身无单步超时）。
 - `mysqlErrno` 校验错误码的数字右边界：`Error 10620` 不再被误判为 `1062`（重复键）、`Error 12130` 不再被误判为 `1213`（死锁）。
 - CI：同一 PR 的重复推送取消旧运行（`concurrency`），e2e 改用 `PAGE=50 BATCH=100` 覆盖跨页游标与多批事务；`push` 触发限定在 `main`，避免 PR 双跑。
-- 补测：退避等待期间的上下文取消、快照插入的冲突重做上限（≤4 轮后报 `ErrConflict`）与冲突后恢复；覆盖率 86.2% → 86.5%。
+- 补测：退避等待期间的上下文取消、快照插入的冲突重做上限（≤4 轮后报 `ErrConflict`）与冲突后恢复；覆盖率 86.2% → 87.1%。
 - `docs/interface-contracts.md` 增加错误分类的英文版（值班人员按错误码处置不需要中文）。
 - CI 首次在 GitHub Actions 实跑通过（run 42596345410，Go 1.22.x / 1.25.4 双矩阵 + MySQL 8.4 service + 跨页 e2e）。
 
 ### Migration note / 迁移说明
 
-本次没有修改公开 API 签名、数据库结构、依赖版本或对账数据面语义；唯一的行为侧改动是冲突错误的包装方式（`%v` → `%w`），它只让 `errors.As` 能取到驱动错误，报错文本与分类结果不变。旧调用方式保持可用，无需迁移，不需要 deprecated 包装。新增检查入口不替换或削弱原测试；直接运行集成测试仍保留原有 Skip 语义，只有新发布门禁拒绝把 Skip 算作数据库验证成功。
+本次没有修改公开 API 签名、数据库结构或依赖版本，但有三项行为侧变化，升级前请对照：
+
+1. **冲突错误包装**：`mysqltable` 用 `%w: %w` 包装主键冲突（原先 `%v` 截断驱动错误链）。报错文本与 `errors.Is(err, ErrConflict)` 结果不变，新增的是 `errors.As` 能取到驱动错误。
+2. **配置校验加严**：`NewPair` 现在拒绝空路由、重复表名、`RouterFunc(tables, nil)`、`KeyColumn` 不在 `Columns` 中、只有主键列没有值列的 `Schema`。此前这些配置能在 `NewPair` 通过，但会在运行期 panic 或生成非法 SQL（`UPDATE t SET  WHERE ...`）。
+3. **错误码识别边界**：`IsDuplicateKey` / `IsTransient` 不再把 `Error 10620` 当成 1062、`Error 12130` 当成 1213。旧调用方式保持可用，无需迁移，不需要 deprecated 包装。新增检查入口不替换或削弱原测试；直接运行集成测试仍保留原有 Skip 语义，只有新发布门禁拒绝把 Skip 算作数据库验证成功。
 
 `ROWS=2000` 的快速验证需额外传 `DIST=uniform`，因为现有默认 skew 数据集要求至少 27009 行。脚本默认值及 skew 边界分布未修改。验证记录见 VERIFICATION：build / vet / race、11 个真实 MySQL 集成测试、2000 行 uniform 与 30000 行 skew 的 e2e 均通过；`ROWS=2000` 需显式 `DIST=uniform`，默认 skew 数据集要求至少 27009 行。
 

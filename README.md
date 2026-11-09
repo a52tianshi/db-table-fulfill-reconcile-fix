@@ -143,7 +143,7 @@ flowchart LR
 
 - 某一步超过 `MaxAttempts` 仍然失败，`Run` 立即返回 `scan old page 3: giving up after 5 attempts: <最后一次的错误>`。已提交的事务不回滚，修好问题后重跑即可（幂等）。
 - context 取消、引擎自身的不变量错误（例如同一批里出现重复 key）不会重试，直接退出。
-- `ErrConflict`（插入时主键冲突）也不按 `Retry` 重试，而是对这些 key 重新加锁复核，最多 3 次。
+- `ErrConflict`（插入时主键冲突）也不按 `Retry` 重试，而是对这些 key 重新加锁复核：首轮之外最多再 3 轮，即最多 4 次锁定复核事务。
 - 事务整体重跑：事务内是先加锁重读、再写入，所以即使上次提交结果未知，重跑也是安全的。
 - `Report.Retries` 记录了总共重试的次数。
 
@@ -201,7 +201,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 |---|---|---|---|
 | `InsertBatchLocked`（推荐） | 每个事务加锁重读至多 `TxBatchSize` 个 key，再多行 INSERT 最新值 | 7.7s | 一次就写对 |
 | `InsertBatchSnapshot` | 直接用扫描时读到的值多行 INSERT，不重读 | 5.5s | 扫描后被改过的行会写成旧值，下一轮会作为 Different 加锁修正。因此 `Missing = Fix` 时必须 `Different = Fix`，否则 `Run` 直接报参数错误。**前提：老表不删除数据**，并且在后续某轮报告 `Consistent()` 之前，新表不能对外提供读 |
-| `InsertPerRow` | 每个 key 一个事务 | 53s | 最慢，用于排查 |
+| `InsertPerRow` | **初次比对判为 Missing** 的 key 逐条一个事务（比对阶段发现为 Different 的候选仍按 `TxBatchSize` 批量复核） | 53s | 最慢，用于排查 |
 
 耗时是 e2e 默认参数的实测值：页、批都是 1000，事务 200 个 key，8 个写入线程持续双写，不注入故障；本机 Apple M5，MySQL 9.7.1。各模式、各参数组合的完整结果见 [e2e/README.md](e2e/README.md#参考结果)。
 
@@ -274,7 +274,7 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 
 ## 10. 发布与运维 / Release and operations
 
-- 当前发布基线为 `v0.1.0`，本轮改动尚未发布；API 和数据面语义未变更，无迁移操作。[CHANGELOG](CHANGELOG.md) 记录版本、兼容与未来 deprecated 适配策略。
+- 当前版本为 `v0.3.0`（基线 `v0.1.0`）。公开 API 签名与数据面语义未变，但 `NewPair` 的配置校验加严、冲突错误包装改为 `%w`，升级前请对照 [CHANGELOG 的迁移说明](CHANGELOG.md)。
 - [运维手册](docs/operations.md)：权限、双写条件、限流与停止、故障注入、恢复、切流前验证。
 - [SECURITY](SECURITY.md)：报告数据损坏与凭据风险；[CONTRIBUTING](CONTRIBUTING.md)：本地与 CI 一致的检查命令。
 - [SELF-ASSESS](SELF-ASSESS.md)：六项证据评分、未完成项与自我质疑。验证记录不替代业务自己的容量与恢复演练。

@@ -19,7 +19,7 @@
 
 ## 覆盖率 / Coverage
 
-以下覆盖率按本节给出的命令测量，可复现。
+以下覆盖率按本节给出的命令在 v0.3.0 上测量，可复现。
 
 根 module 的可复现命令：`go test -race -count=1 -coverpkg=./... -coverprofile=/tmp/cover.out ./... && go tool cover -func=/tmp/cover.out | tail -1`（下表合计 86.2% 即该命令 `total:` 行）。分母是根 module 三个包的**可执行语句**，不是行、分支、场景或生产流量覆盖。`-coverpkg=./...` 将根包测试调用 memtable 的执行也计入；仅看默认逐包 go test 会低估 memtable 的使用覆盖。多个测试二进制的同一位置按覆盖集合合并，不把各行百分比相加。
 
@@ -27,10 +27,10 @@
 |---|---|---|
 | reconcile 根包 | 376 / 393 | 95.7% |
 | memtable | 85 / 93 | 91.4% |
-| mysqltable | 168 / 241 | 69.7% |
-| 合计 | 629 / 727 | 86.5% |
+| mysqltable | 188 / 259 | 72.6% |
+| 合计 | 649 / 745 | 87.1% |
 
-`go tool cover -func` 的合计为 86.5%（相对 v0.2.0 提升 0.3pp，来自新增的冲突重做与退避取消用例）。基线默认逐包口径为根包 94.1%、memtable 49.5%、mysqltable 69.1%；它与上表的跨包口径不同，不用二者直接计算“提升幅度”。e2e 是独立 module，未包含在上述分母；新增 store 数据分布测试不代表覆盖 CLI、数据库写入或 Chaos，CLI 仍无原有测试。
+`go tool cover -func` 的合计为 87.1%（相对 v0.2.0 提升 0.9pp，来自冲突重做/退避取消用例与 v0.3.0 的路由校验用例）。基线默认逐包口径为根包 94.1%、memtable 49.5%、mysqltable 69.1%；它与上表的跨包口径不同，不用二者直接计算“提升幅度”。e2e 是独立 module，未包含在上述分母；新增 store 数据分布测试不代表覆盖 CLI、数据库写入或 Chaos，CLI 仍无原有测试。
 
 ## 未覆盖分支与风险 / Gaps and risk
 

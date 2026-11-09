@@ -13,10 +13,10 @@
 
 ## Repairer / Tx
 
-- `InTx` 在 fn 返回 nil 时提交，任何错误都回滚。只做一次尝试；引擎遇到可重试错误时会重跑整个 `InTx`。每次重跑都重新收集结果，只在提交成功后才计数和回调 Notifier。提交结果未知时（例如连接在 COMMIT 时断开）重跑也是安全的：重跑时先加锁重读，已经插入的行会被识别为已一致。**`InsertBatchSnapshot` 是例外**：它重试时直接再发一次无锁 `INSERT`，靠第二次插入返回 1062（`ErrConflict`，不计入 `Report.Retries`）才转入锁定复核；因此该模式下丢应答会放大成 3 个事务；这批写入最终按 `Stale` 计入，`Inserted`/`Updated` 会偏小（`Consistent()` 不受影响，因为它只判断是否还有待修复差异），且自定义 `Repairer.Tx.Insert` 若实现成 upsert（`REPLACE` / `INSERT IGNORE`）或目标表没有唯一键，重试会静默覆盖新值或重复写入。
-- `Lock` 加锁重读两边，**先锁老表，再锁新表**，每侧都先按 `Schema.KeyLess` 对同物理表的全部请求 key 排序，再切分 `IN` 查询加锁。线上双写必须遵守相同的顺序，否则可能死锁。
+- `InTx` 在 fn 返回 nil 时提交，任何错误都回滚。只做一次尝试；引擎遇到可重试错误时会重跑整个 `InTx`。每次重跑都重新收集结果，只在提交成功后才计数和回调 Notifier。提交结果未知时（例如连接在 COMMIT 时断开）重跑也是安全的：重跑时先加锁重读，已经插入的行会被识别为已一致。**`InsertBatchSnapshot` 是例外**：它重试时直接再发一次无锁 `INSERT`，靠第二次插入返回 1062（`ErrConflict`，不计入 `Report.Retries`）才转入锁定复核；因此该模式下丢应答会放大成 3 个事务；这批写入最终按 `Stale` 计入，`Inserted`/`Updated` 会偏小；注意 `Consistent()` 统计的是**本轮确认过的差异累计**（`Missing+Different+Extra`），不是“还剩多少没修”，所以修复成功的一轮仍可能返回 false，要看下一轮，且自定义 `Repairer.Tx.Insert` 若实现成 upsert（`REPLACE` / `INSERT IGNORE`）或目标表没有唯一键，重试会静默覆盖新值或重复写入。
+- `Lock` 加锁重读两边，**先锁老表，再锁新表**，每侧的加锁顺序是：先按**物理表名的字典序**（`sort.Strings`，所以 `t_10` 排在 `t_2` 前），同一张表内再按 `Schema.KeyLess` 排序，然后切分 `IN` 查询加锁。线上双写必须遵守相同的顺序，否则可能死锁。
 - 隔离级别建议用 READ COMMITTED：普通锁定搜索不加间隙锁并能读到最新已提交版本；外键和重复键检查仍可能使用间隙锁，仍需处理死锁。
-- `Insert` 遇到主键冲突时，返回的错误要包装 `ErrConflict`。引擎收到后会对这些 key 重新加锁复核（最多 3 次）。
+- `Insert` 遇到主键冲突时，返回的错误要包装 `ErrConflict`。引擎收到后会对这些 key 重新加锁复核：首轮之外最多再复核 3 轮，即单个 chunk 最多 4 次锁定复核事务，仍冲突则返回错误。
 - `Update` 用老表整行覆盖新表。老表和新表的结构必须相同。
 - 引擎从不删除新表的行。
 

@@ -235,7 +235,7 @@ lint PASS (gofmt + bash -n)
 
 ## 8. 覆盖口径与证据边界
 
-根 module 跨包语句覆盖为 629/727 = 86.5%（核心 376/393、memtable 85/93、mysqltable 168/241），按 docs/testing.md 的命令可复现；较 v0.2.0 的 617/716 提升来自新增的冲突重做与退避取消用例。该分母不含独立 e2e module，根 module 中 MySQL 事务函数的 0% 也不表示本轮集成没有执行它们。完整口径和未覆盖风险见 [docs/testing.md](docs/testing.md)。
+根 module 跨包语句覆盖为 649/745 = 87.1%（核心 376/393、memtable 85/93、mysqltable 188/259），按 docs/testing.md 的命令可复现；较 v0.2.0 的 617/716 提升来自新增的冲突重做与退避取消用例。该分母不含独立 e2e module，根 module 中 MySQL 事务函数的 0% 也不表示本轮集成没有执行它们。完整口径和未覆盖风险见 [docs/testing.md](docs/testing.md)。
 
 - 新增 memtable 提交后丢响应回归只证明 Repairer 契约；真实网络丢 COMMIT 响应、主从故障转移、进程/磁盘故障未演练。
 - 本轮跑了 30000 行 skew；未跑原默认 50000 行/20000 用户、5% 故障矩阵或生产容量演练。
@@ -316,7 +316,7 @@ go test -race -count=1 -coverpkg=./... -coverprofile=/tmp/cover.out ./... && go 
 ```
 
 ```text
-total:  (statements)  86.5%
+total:  (statements)  87.1%
 ```
 
 ### 10.6 新增测试的变异检查 / Mutation check

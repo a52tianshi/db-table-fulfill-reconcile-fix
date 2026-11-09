@@ -92,6 +92,7 @@ func TestNewPairValidates(t *testing.T) {
 		"no dup func":  func(c *PairConfig[order, key]) { c.IsDuplicate = nil },
 		"no scan":      func(c *PairConfig[order, key]) { c.Schema.Scan = nil },
 		"no key order": func(c *PairConfig[order, key]) { c.Schema.KeyLess = nil },
+		"only key col": func(c *PairConfig[order, key]) { c.Schema.Columns = []string{"order_id"} },
 	}
 	for name, mutate := range cases {
 		c := pairConfig()

@@ -44,7 +44,8 @@ func Example() {
 			MaxAttempts: 5,
 			Backoff:     10 * time.Millisecond,
 			MaxBackoff:  time.Second,
-			Retryable:   func(error) bool { return true },
+			// 生产里应传 mysqltable.IsTransient；本示例用内存存储，不会失败。
+			Retryable: func(error) bool { return false },
 		},
 	})
 	if err != nil {

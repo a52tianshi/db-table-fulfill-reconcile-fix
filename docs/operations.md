@@ -7,7 +7,7 @@
 1. 明确老表是权威源，确认新旧表列结构相同、主键唯一、`K` 中主键和分片字段不可变。路由、表清单和字符串 collation 必须与线上写入一致。
 2. 为本库使用单独账号：**老表需要 `SELECT` + `LOCK TABLES`**——`mysqltable` 的复核事务对两侧都执行 `SELECT ... FOR UPDATE`，而 MySQL 8.0.22 起锁定读还要求会话对表具备 `UPDATE`、`DELETE`、`LOCK TABLES` 三者之一，只授 `SELECT` 会在第一个复核事务上报 `1142`，且该错误不属于 `IsTransient`，`Run` 会直接退出（`Missing=Warn` 的 Warn 模式同样如此，因为它也要复核）。新表需要 `SELECT` / `INSERT` / `UPDATE`。库不会 `DELETE` 或建表；e2e 的建库和 `DROP` 权限仅属于隔离测试账号。生产账号不使用 root。
 
-3. 先验证业务同事务双写，老表先锁、新表后锁，同侧按数据库主键序锁定。适配器只支持一个 `*sql.DB` 内的事务；跨实例必须另行实现 Repairer 并证明一致性边界。
+3. 先验证业务同事务双写：老表先锁、新表后锁；同一侧内先按**物理表名字典序**、再按主键序锁定（不是全局主键序，分表时一个事务会跨多张老表）。适配器只支持一个 `*sql.DB` 内的事务；跨实例必须另行实现 Repairer 并证明一致性边界。
 4. 先以 `Missing=Warn, Different=Warn` 运行，检查 Extra、错片、差异规模。Warn 仍使用复核事务和行锁，不是零负载探测。
 5. 确认权威源及数据保留要求后启用 Fix，通常选 `InsertBatchLocked`。快照模式仅在老表不删除、Different=Fix 且收敛前新表不对外读时使用。
 6. 每轮同时保存 error、Report、Progress 的最终回调、配置和边界。启用 CheckExtra，确认双写健康，再做独立校验；e2e 的 verify 使用同一一致性快照逐行核对并检查落片。
@@ -18,7 +18,7 @@
 
 - 引擎串行、有界攒批；配置 `ScanPageSize`、`BatchSize`、`TxBatchSize` 和适配器 `InChunk` / `InsertChunk` 共同控制 SQL 数量、锁时长和峰值内存。`MemoryLimit` 只限制估算缓存批，不是 RSS；驱动、扫描页和查询结果另占内存。
 - 库没有每秒行数限流或跨任务互斥。由调用方限制调度频率、连接池与同时运行的任务数量；先按代表性数据观察 DB CPU、锁等待、连接数和延迟，再调整批大小。
-- **连接与锁超时必须配在 DSN 上**：库没有单步/单事务超时，`Run(ctx)` 的取消只在下一次检查点生效，正在执行的 `Lock` 或 `Exec` 不会被中断。生产 DSN 至少设置 `readTimeout`、`writeTimeout`、`timeout`（连接），并把 `innodb_lock_wait_timeout` 调到业务可接受的上限，否则慢 SQL 或网络半开会长期持有行锁、阻塞线上双写。
+- **连接与锁超时必须配在 DSN 上**：库没有单步/单事务超时；`ctx` 会传给 `BeginTx` / `QueryContext` / `ExecContext`，是否中断取决于驱动——go-sql-driver 会在取消时中断语句并关闭连接，因此**在 COMMIT 途中取消属于提交结果未知**，处置同下文“停止与恢复”第 4 步。生产 DSN 至少设置 `readTimeout`、`writeTimeout`、`timeout`（连接），并把 `innodb_lock_wait_timeout` 调到业务可接受的上限，否则慢 SQL 或网络半开会长期持有行锁、阻塞线上双写。
 - 监控 Run error、完成耗时、`Retries` 增长、Extra、连续多轮 Missing/Different、`Inserted/Updated` 和双写错误；指标阈值由业务容量演练确定，本库没有通用 SLA。
 - `Suspected` 与 `Stale` 在并发双写时可以增加；`Warned` 不等于告警投递成功数。Progress 同步执行，回调阻塞会延迟扫描；使用有界异步投递并明确队列满策略。
 - `LogNotifier` 会包含 key / 差异信息。不要无筛选记录完整业务行、DSN 或凭据。可靠通知需业务持久化 outbox / 恢复协议；重复 Run 不会保证重放已经修复的 Finding。

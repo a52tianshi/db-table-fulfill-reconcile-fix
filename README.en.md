@@ -191,6 +191,6 @@ CI configures Go 1.22.x / 1.25.4 and an isolated MySQL 8.4 service, with the sam
 
 ## 10. Release and operations
 
-This work starts from v0.1.0 and is unreleased. Public APIs and data semantics are unchanged; no migration is needed. See [CHANGELOG](CHANGELOG.md) for compatibility/deprecation policy, [SECURITY](SECURITY.md) for reporting and deployment boundaries, [CONTRIBUTING](CONTRIBUTING.md) for checks and [SELF-ASSESS](SELF-ASSESS.md) for scores and unresolved work.
+Current version is v0.3.0 (baseline v0.1.0). Public API signatures and data semantics are unchanged, but `NewPair` validation is stricter and conflict errors now wrap with `%w`; check the migration note in [CHANGELOG](CHANGELOG.md) before upgrading. See [CHANGELOG](CHANGELOG.md) for compatibility/deprecation policy, [SECURITY](SECURITY.md) for reporting and deployment boundaries, [CONTRIBUTING](CONTRIBUTING.md) for checks and [SELF-ASSESS](SELF-ASSESS.md) for scores and unresolved work.
 
 Existing offline demonstrations: [guide](guide.html), [batch scan](batch-scan-demo.html), [single-thread flow](single-thread-state-flow.html), with [maintenance notes](docs/visuals/README.md). They illustrate the design, including capabilities that are explicitly not implemented.

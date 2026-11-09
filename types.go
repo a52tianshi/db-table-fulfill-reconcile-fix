@@ -106,7 +106,9 @@ const (
 	// InsertBatchLocked: per transaction, Lock-reread up to TxBatchSize keys,
 	// then one multi-row Insert of the fresh old rows.
 	InsertBatchLocked InsertMode = iota + 1
-	// InsertPerRow: one transaction per missing key. Slowest.
+	// InsertPerRow: one transaction per key that the initial comparison
+	// reported as missing. Candidates that showed up as different are still
+	// batched by TxBatchSize. Slowest.
 	InsertPerRow
 	// InsertBatchSnapshot: multi-row Insert of the rows as scanned, no reread.
 	// Fastest. A row updated between scan and insert lands stale in new; the

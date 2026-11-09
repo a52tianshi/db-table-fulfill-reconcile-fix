@@ -5,6 +5,9 @@
 // and compared. Suspected differences are never acted on directly: they are
 // reread inside a transaction (with row locks, old side first), classified
 // again from the fresh state, and only then warned or fixed per Policy.
+// The one exception is InsertBatchSnapshot: it inserts the rows as scanned
+// and falls back to the locking recheck only on a duplicate-key conflict;
+// see InsertMode for its preconditions.
 // Rows only present in new are warned, never deleted.
 //
 // The single entry point is Run(ctx, Config). Every Config field is
