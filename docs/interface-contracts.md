@@ -101,7 +101,7 @@ flowchart TB
 
 | 类别 / Code | 检测方式 | 引擎行为与处理 |
 |---|---|---|
-| 配置错误 / Invalid config | `Run` / `NewPair` 返回聚合错误，尚无导出 sentinel | 不访问数据；修复全部必填项。比较器构造也可能返回错误，`Within` 负容差会 panic。 |
+| 配置错误 / Invalid config | `Run` / `NewPair` 返回聚合错误，尚无导出 sentinel | 不访问数据；修复全部必填项。`NewPair` 会拒绝：空路由、重复表名、`RouterFunc(tables, nil)` 这类空 route 闭包、非法标识符、`KeyColumn` 不在 `Columns` 中。比较器构造也可能返回错误，`Within` 负容差会 panic。 |
 | 取消 / Canceled, deadline | `errors.Is(err, context.Canceled/DeadlineExceeded)` | 不重试；保留之前已提交事务。恢复后新建 ctx 重跑。 |
 | 写竞争 / Conflict, MySQL 1062 | `errors.Is(err, reconcile.ErrConflict)` | 不按 Retry 原样重试；快照插入转锁定复核，复核冲突最多追加 3 轮；持续竞争返回错误。 |
 | 错片 / Misrouted | `errors.Is(err, mysqltable.ErrMisrouted)`，`errors.As` 获取 `*MisroutedError` | `IsTransient` 判为不可重试；停止，人工核对路由及落片，库不移动或删除行。 |
@@ -116,7 +116,7 @@ For on-call readers: this table is the same classification as above, in English.
 
 | Category | Detection | Engine behaviour / action |
 |---|---|---|
-| Invalid config | `Run` / `NewPair` return an aggregated error (no exported sentinel yet) | No data access. Fix the required fields. Comparators may also fail; a negative `Within` tolerance panics. |
+| Invalid config | `Run` / `NewPair` return an aggregated error (no exported sentinel yet) | No data access. Fix the required fields. `NewPair` rejects: empty routers, duplicated table names, a `RouterFunc(tables, nil)` closure, invalid identifiers, and a `KeyColumn` missing from `Columns`. Comparators may also fail; a negative `Within` tolerance panics. |
 | Canceled / deadline | `errors.Is(err, context.Canceled)` or `context.DeadlineExceeded` | Not retried. Transactions already committed stay committed. Rerun with a fresh context. |
 | Write conflict (MySQL 1062) | `errors.Is(err, reconcile.ErrConflict)` | Not retried as-is; snapshot insert falls back to a locking recheck, at most 3 extra rounds; persistent contention returns an error. |
 | Misrouted row | `errors.Is(err, mysqltable.ErrMisrouted)`; `errors.As` yields `*MisroutedError` | `IsTransient` reports it as permanent. Stop and check routing/sharding manually; the library never moves or deletes rows. |

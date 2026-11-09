@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `NewPair` 现在拒绝会在运行期炸的配置：空路由表清单、重复表名、`RouterFunc(tables, nil)`（原来会在第一个 key 上 panic）、`KeyColumn` 不在 `Columns` 中。属于校验加严，签名与返回类型不变。
 - `mysqltable` 冲突错误改用 `%w: %w` 包装，驱动错误链不再被 `%v` 截断；报错文本与 `errors.Is(err, ErrConflict)` 行为不变。
 - 最小权限说明纠正为 `SELECT + LOCK TABLES`：复核事务对两侧都做 `FOR UPDATE`，MySQL 8.0.22 起只授 `SELECT` 会在首个事务报 1142 并终止（含 Warn 模式）。
 - 提交响应丢失回归补上 Insert 事务路径（原用例的批次切分使故障只落在 Update 事务上），并加断言 `faultedInserts > 0` 防止再次退化。

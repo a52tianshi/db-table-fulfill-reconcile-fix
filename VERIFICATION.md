@@ -376,3 +376,15 @@ checks (1.25.4)   success  09:49:37Z → 09:51:04Z
 - Run: https://github.com/a52tianshi/db-table-fulfill-reconcile-fix/actions/runs/42596345410
 - 结论：`success`。MySQL 8.4 service 容器、集成测试 Skip 门禁、`PAGE=50 BATCH=100` 的跨页 e2e 都在 Actions 上真实执行过。
 - 唯一非阻塞告警：`actions/checkout@v4` 与 `actions/setup-go@v5` 使用 Node 20，被 runner 强制以 Node 24 运行；属上游弃用提示，不影响结果。
+
+### 10.9 RouterFunc 与路由配置校验 / Router validation
+
+评审一致通过的 M9：`RouterFunc(tables, nil)` 原来能构造出 Router，第一次 `Route(key)` 才 panic，而那一刻通常已经在一轮对账里、持有行锁。
+
+| 改动 | 位置 | 证据 |
+|---|---|---|
+| `NewPair` 拒绝空表清单、重复表名、nil route 闭包 | `mysqltable/schema.go`（`validateRouter`） | `TestNewPairRejectsNilRouteFunc`、`TestNewPairRejectsBadTableLists` |
+| 合法 `RouterFunc` 仍被接受（无回归） | 同上 | `TestNewPairAcceptsRouterFunc` |
+| 校验加严不影响签名与返回类型 | `Router` 接口未变 | `go build ./...`、`go vet ./...` |
+
+变异检查：删掉 `validateRouter` 里的 nil-route 分支后，`TestNewPairRejectsNilRouteFunc` 立刻失败（"expected an error for a nil route function"），还原后通过。

@@ -82,18 +82,50 @@ func (c *PairConfig[T, K]) validate() error {
 		}
 	}
 	check(hasKey, "Schema.KeyColumn %q must be one of Columns", s.KeyColumn)
-	for _, r := range []Router[K]{c.Old, c.New} {
-		if r == nil {
+	for _, side := range []struct {
+		name string
+		r    Router[K]
+	}{{"Old", c.Old}, {"New", c.New}} {
+		if side.r == nil {
 			continue
 		}
-		for _, t := range r.Tables() {
-			if err := checkIdent(t); err != nil {
-				errs = append(errs, err)
-			}
+		if err := validateRouter(side.name, side.r); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("mysqltable: invalid config:\n%w", err)
+	}
+	return nil
+}
+
+// validateRouter rejects configuration that would fail at run time instead of
+// here: a nil Route closure (RouterFunc(tables, nil) would panic on the first
+// key), an empty or duplicated table list (a duplicated table is scanned twice
+// and can be written twice per batch).
+func validateRouter[K comparable](side string, r Router[K]) error {
+	var errs []error
+	tables := r.Tables()
+	if len(tables) == 0 {
+		errs = append(errs, fmt.Errorf("%s router lists no tables", side))
+	}
+	seen := make(map[string]struct{}, len(tables))
+	for _, t := range tables {
+		if err := checkIdent(t); err != nil {
+			errs = append(errs, fmt.Errorf("%s router: %w", side, err))
+			continue
+		}
+		if _, dup := seen[t]; dup {
+			errs = append(errs, fmt.Errorf("%s router: duplicate table %q", side, t))
+			continue
+		}
+		seen[t] = struct{}{}
+	}
+	if f, ok := r.(funcRouter[K]); ok && f.route == nil {
+		errs = append(errs, fmt.Errorf("%s router: RouterFunc was built with a nil route function", side))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 	return nil
 }
