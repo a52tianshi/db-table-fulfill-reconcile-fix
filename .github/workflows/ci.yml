@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22.x', '1.25.4']
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: reconcile_codex
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      E2E_MYSQL_DSN: root@tcp(127.0.0.1:3306)/reconcile_codex
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: e2e/go.sum
+      - name: Build both modules
+        run: ./scripts/check.sh build
+      - name: Vet both modules
+        run: ./scripts/check.sh vet
+      - name: Race tests (no database)
+        run: ./scripts/check.sh test
+      - name: Lint (gofmt and shell syntax)
+        run: ./scripts/check.sh lint
+      - name: MySQL integration (skip is failure)
+        run: ./scripts/check.sh integration
+      - name: Concurrent writer and independent verification
+        run: DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh

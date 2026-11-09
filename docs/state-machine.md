@@ -2,7 +2,41 @@
 
 一张 `user_old` 对应同结构的 `user_new_shard_1 … 100`。本稿定义方案。Go 库已实现其中的分片路由、分页扫描、按分片的批量复核与插入事务、逐步重试和进度回调（见 [README](../README.md)）；逐 key 状态计数、检查点等仍是设计，尚未实现。[HTML](../guide.html) 提供 16 步离线演示。
 
-## 状态归属
+## 当前实现与设计边界 / Implementation status
+
+原设计中的逐 key 状态、Memory 状态计数、安全游标和检查点仍是设计，以下是当前代码实际执行的批次状态，不能据设计稿宣称已经支持断点恢复。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Validate
+    Validate --> ScanOld: 配置有效
+    Validate --> Failed: 配置无效 / 不访问数据
+    ScanOld --> Pair: 页与缓存批就绪
+    Pair --> Recheck: 疑似差异
+    Pair --> ScanOld: 一致 / 下一批
+    Recheck --> Commit: 锁定重读 / 分类 / 写入或告警
+    Commit --> Count: 提交成功
+    Count --> Notify: 计入整事务结果
+    Notify --> ScanOld: 当前批完成
+    ScanOld --> ScanNew: 正向结束 / CheckExtra
+    ScanNew --> Recheck: 仅新表有的候选
+    Notify --> ScanNew: 反向当前批完成
+    ScanOld --> Done: 正向结束 / SkipExtra
+    ScanNew --> Done: 反向结束
+    Commit --> Recheck: 可重试错误 / 整事务重做
+    ScanOld --> Failed: 扫描重试耗尽 / 尾批不处理
+    Pair --> Failed: 查询失败或契约破坏
+    Recheck --> Failed: 不可重试或耗尽
+    Notify --> Failed: 通知重试耗尽 / 数据已提交
+    Failed --> [*]
+    Done --> [*]
+```
+
+补充：`InsertBatchSnapshot` 的缺失候选可从 Pair 直接执行 INSERT 事务；冲突才进入 Recheck。图中的两条 Notify 出边由当前 Phase 决定，不会同时执行正反向扫描。ScanNew 也可在查询失败时进入 Failed；每一步的完整重试契约见 [接口约定](interface-contracts.md)。取消会停止后续推进，不会撤销已提交分片。
+
+当前只有 `ScanOld` / `ScanNew` 两种公开 Phase，`PhaseDone` 和 `Done` 是同步回调标记；图中其他名称是说明性状态，不是新增 API。Done 表示本轮成功返回，不是所有数据库在同一时刻一致的证明。新 Run 从头扫描并重读以恢复；没有可跨进程保存的游标或未投递 Finding 列表。操作顺序见 [架构与数据流](interface-contracts.md#架构与数据流--architecture-and-data-flow)。
+
+## 原设计：状态归属
 
 - 每张物理老表、新分片表各有独立的简单状态：未开始、扫描中、缓存满暂停、扫描结束、失败。取消由任务记录并停止推进，不能视作扫描结束。
 - 每张表保存读取游标、安全游标、已读条数、当前批次 ID/范围、完成批次数及扫描边界。按 key 查询不推进扫描游标。

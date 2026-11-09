@@ -1,5 +1,7 @@
 # db-table-fulfill-reconcile-fix
 
+[English mirror](README.en.md) · [验证记录](VERIFICATION.md) · [运维手册](docs/operations.md) · [贡献指南](CONTRIBUTING.md)
+
 老表 → 新表（可分表）在线迁移时使用的 **数据比对与补齐** Go 库。老表是权威数据源。库会扫描老表，按批查询新表做比对；发现疑似差异后，在事务内加锁重读两边，确认确实不一致，再按你的策略 **告警或修复**。只在新表存在的行只告警，永不删除。
 
 - 纯标准库，Go 1.22+；`mysqltable` 只依赖 `database/sql`，用哪个驱动由你决定。
@@ -9,6 +11,49 @@
 ```sh
 go get github.com/a52tianshi/db-table-fulfill-reconcile-fix
 ```
+
+## 0. 五分钟运行 / Quickstart
+
+在仓库根目录执行。需要 Go 1.22+、已运行的本机 MySQL 和 `mysql` 客户端；不需要 Docker。下面使用专用测试库，**e2e 会 DROP 并重建其中的 `orders_old` 与 100 张 `orders_new_*` 表**。无密码 root 仅用于本机测试，正式接入请用最小权限账号。
+
+一条命令建库：
+
+```sh
+mysql -u root -e "CREATE DATABASE IF NOT EXISTS reconcile_codex"
+```
+
+一条命令构建并运行三轮对账、并发双写与独立最终校验：
+
+```sh
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+小数据必须指定 `DIST=uniform`：默认 `skew` 为覆盖分页边界要求至少 27009 行。缩小参数仅用于快速验证，全量脚本默认值未改。本轮 2000 行 uniform 与 30000 行默认 skew 均得到 `E2E PASS`。
+
+2000 行 uniform 本轮终端真实输出片段（设置可写的 `GOCACHE` 后）：
+
+```text
+[verify] old=20829 new=20829 checked=20829 missing=0 different=0 misrouted=0 extra=0 | 123ms
+[verify] PASS: old and new tables are identical
+
+E2E PASS
+```
+
+上一轮受限，本轮已复跑。原样省略 `DIST=uniform` 的 2000 行命令仍因 skew 最小行数约束失败；详细命令、失败和成功的完整输出见 [VERIFICATION.md](VERIFICATION.md)。没有数据库也能运行现有内存示例，验证缺失插入、整行覆盖与 Extra 保留；二次运行幂等性由单测另行验证：
+
+```sh
+go test -count=1 -v -run '^Example$' .
+```
+
+真实终端输出（耗时会变化）：
+
+```text
+=== RUN   Example
+--- PASS: Example (0.00s)
+PASS
+```
+
+若环境禁止写入 Go 默认缓存，可先执行 `export GOCACHE=/tmp/codex-clarity-go-build`。MySQL 用 TCP 连接且客户端 socket 不匹配时，建库命令加 `-h 127.0.0.1`。本文后续讲解 API；[概念和错误码](docs/interface-contracts.md#概念表--glossary)、[已实现状态流](docs/state-machine.md#当前实现与设计边界--implementation-status)、[测试口径](docs/testing.md) 可按需查阅。
 
 ## 1. 工作流程
 
@@ -223,10 +268,18 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 ```
 
 ```sh
-go test -race ./...      # 单测：engine_test / compare_test / progress_test / memtable / mysqltable（不需要数据库）
-cd e2e && go test ./...  # mysqltable 集成测试：连真实 MySQL，连不上自动跳过
-cd e2e && ./run.sh       # 端到端测试：需要本机 MySQL；默认对 2% 的 SQL 调用注入失败，验证重试。详见 e2e/README.md
+./scripts/check.sh all          # 两个 module 的 build / vet；无 DB race 单测；gofmt 和 shell 语法 lint
+./scripts/check.sh integration  # 真实 MySQL 集成；任何 Skip 都视为门禁失败
 ```
+
+完整 e2e 使用第 0 节的专用 DSN 命令。`mysqltable_it` 会把 DSN 的库名强制改为共享的 `reconcile_it` 并重建测试表，不能靠 DSN 隔离，勿并发执行。CI 在独立 MySQL 8.4 service 上运行相同命令，另跑小规模 e2e；本轮本机可执行结果与尚未验证的版本见 [VERIFICATION.md](VERIFICATION.md)。
+
+## 10. 发布与运维 / Release and operations
+
+- 当前发布基线为 `v0.1.0`，本轮改动尚未发布；API 和数据面语义未变更，无迁移操作。[CHANGELOG](CHANGELOG.md) 记录版本、兼容与未来 deprecated 适配策略。
+- [运维手册](docs/operations.md)：权限、双写条件、限流与停止、故障注入、恢复、切流前验证。
+- [SECURITY](SECURITY.md)：报告数据损坏与凭据风险；[CONTRIBUTING](CONTRIBUTING.md)：本地与 CI 一致的检查命令。
+- [SELF-ASSESS](SELF-ASSESS.md)：六项证据评分、未完成项与自我质疑。验证记录不替代业务自己的容量与恢复演练。
 
 ## 设计文档
 

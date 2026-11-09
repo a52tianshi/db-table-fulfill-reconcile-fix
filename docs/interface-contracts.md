@@ -59,3 +59,55 @@
 - `Within` 使用无符号差值幅度，支持完整 int64 边界，不会有符号减法溢出。负 tolerance 在构造时 panic。
 - `Struct` 的 ignore/custom 名称仅允许顶层字段；匿名嵌入的提升字段明确报错，包含指针嵌入。可忽略整个嵌入，或改用 Fields 显式 getter。
 - 比较容忍不改变 Update 的整行覆盖语义：其他字段触发修复时，忽略字段也会被复制。
+
+## 概念表 / Glossary
+
+| 中文 / English | 定义与责任 |
+|---|---|
+| 老表 / Old, source of truth | 权威数据源，既可以是单表也可以路由到多张物理表。修复不会写老表。 |
+| 新表 / New, target | 迁移后的逻辑数据集；`Router` 把不可变 key 映射到一张物理分表。 |
+| 差异 / Finding | `Missing` 老有新无、`Different` 两端有且比较器不一致、`Extra` 仅新有。`Suspected` 只是候选，不能当作已确认差异。 |
+| 修复 / Repair | `Missing=Fix` 插入；`Different=Fix` 按老表整行覆盖；`Extra` 永远保留并告警。提交完成才计修复数。 |
+| 幂等键 / Idempotency key | 业务传入的不可变 `K`，例如 `{OrderID, UserID}`。不是库另造的 token，也不是持久化去重表。数据库唯一主键、路由不变、事务重读共同使重复执行收敛。 |
+| 扫描游标 / Cursor | Source 私有的内存位置，不是可持久化检查点。每次 Run 重新扫描。 |
+| 高水位 / High-water key | 每张物理表扫描开始时读到的最大主键；不是全局一致性快照。 |
+
+## 架构与数据流 / Architecture and data flow
+
+```mermaid
+flowchart TB
+    App[业务: Schema / Router / Policy / Comparator / Retry] --> Engine[Run: 串行引擎]
+    Engine --> Source[Source: ScanPage / Lookup]
+    Source --> Old[(老表 Old)]
+    Source --> New[(新表 New shards)]
+    Engine --> Repairer[Repairer.InTx: 按新分片与 TxBatchSize 分组]
+    Repairer --> Lock[Tx.Lock: 老表先锁 / 新表后锁 / 主键顺序]
+    Lock --> Write[重分类: Insert / 单行 Update / Warn / Stale]
+    Write --> Commit[提交成功]
+    Commit --> Count[整事务 Report 计数]
+    Count --> Notify[逐条 Notifier: 可重试但不保证投递]
+    Notify --> Progress[同步 Progress: 批次 / 阶段 / 最终]
+    Writer[业务双写: 同事务同锁序] --> Old
+    Writer --> New
+```
+
+正向数据流为：读老表页 → 有界缓存批 → 路由查询新表 → 内存比较 → 候选按分片拆事务 → 锁定重读 → 分类写入 → 提交 → 计数 → 通知。反向读新表，只将老表查不到的候选送入复核。快照插入是显式例外：扫描行直接入事务 INSERT，冲突才退回锁定复核。
+
+库不负责连接池大小、业务双写、任务互斥、检查点、通知 outbox 或跨实例原子性。`memtable` 只用于测试和示例；`mysqltable` 通过 `database/sql`，不捆绑驱动。
+
+## 错误码与处置 / Error classification
+
+以下是现有可观察错误分类，**不是新增字符串错误码 API**。优先检查 `errors.Is` / `errors.As`，不要匹配完整错误文案。MySQL 数字码识别目前依赖驱动消息格式，其他驱动须提供适合自己的分类器。
+
+| 类别 / Code | 检测方式 | 引擎行为与处理 |
+|---|---|---|
+| 配置错误 / Invalid config | `Run` / `NewPair` 返回聚合错误，尚无导出 sentinel | 不访问数据；修复全部必填项。比较器构造也可能返回错误，`Within` 负容差会 panic。 |
+| 取消 / Canceled, deadline | `errors.Is(err, context.Canceled/DeadlineExceeded)` | 不重试；保留之前已提交事务。恢复后新建 ctx 重跑。 |
+| 写竞争 / Conflict, MySQL 1062 | `errors.Is(err, reconcile.ErrConflict)` | 不按 Retry 原样重试；快照插入转锁定复核，复核冲突最多追加 3 轮；持续竞争返回错误。 |
+| 错片 / Misrouted | `errors.Is(err, mysqltable.ErrMisrouted)`，`errors.As` 获取 `*MisroutedError` | `IsTransient` 判为不可重试；停止，人工核对路由及落片，库不移动或删除行。 |
+| 瞬时 / 1213, 1205, 2006, 2013, 1040 | `mysqltable.IsTransient(err)` | 受 MaxAttempts 和退避上限约束；整事务重试，重读当前行。 |
+| 连接异常 / Bad connection | `driver.ErrBadConn`、`sql.ErrConnDone` 及现有消息分类 | 同上；COMMIT 响应丢失不等于回滚，修复计数可能偏小。 |
+| 数据契约破坏 / Invariant | 重复扫描 key、Lookup/Lock 返回非请求 key 等错误 | 停止；事务内契约错误不因 Retryable=true 而重试。不要通过忽略错误继续切流。 |
+| 通知失败 / Notify error | 返回错误保留 `errors.Is` 链；操作前缀为 `notify` | 已提交数据保持；按 Retry 处理，耗尽停止。需要可靠事件时外置持久化投递方案。 |
+
+排障和恢复步骤见 [运维手册](operations.md)，测试证据和未覆盖的物理故障见 [测试口径](testing.md)。

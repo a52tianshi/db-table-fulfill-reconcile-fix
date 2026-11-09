@@ -60,6 +60,8 @@ verify 会检查冻结分片的行数仍是预期值，证明这些边界情况�
 
 ## 运行
 
+首次运行优先看根目录 [Quickstart](../README.md#0-五分钟运行--quickstart)：已有本机 MySQL 时先建专属库，再显式传 DSN。`ROWS=2000` 时必须用 `DIST=uniform`；默认 skew 的固定分页边界需要至少 27009 行。缩小参数仅用于快速验证，全量脚本默认值未改。不要在共享环境使用下面示例中的默认 `reconcile_e2e` 库。
+
 ```sh
 cd e2e
 ./run.sh                                     # 默认本机 root@tcp(127.0.0.1:3306)/reconcile_e2e
@@ -78,6 +80,8 @@ bin/e2e reconcile -progress-every 500ms              # 进度日志间隔（0 = 
 `run.sh` 默认 `FAIL_RATE=0.02`：在扫描每一页、批量查询、事务开始和提交前，按 2% 概率注入一个伪造的死锁错误（`internal/store/chaos.go`），验证每一步都会被重试。报告中 `retries` = `injected` + MySQL 真实发生的可重试错误（死锁等，实测一直是 0），所以两者应当相等。设为 `FAIL_RATE=0` 可以关闭注入。
 
 `init` 会 **DROP 并重建** DSN 指定库中的上述 101 张表。writer 日志在 `logs/writer.log`。
+
+发布检查入口是根目录 `./scripts/check.sh integration`：保留现有测试逻辑，但将数据库不可用导致的 Skip 判为门禁失败。`mysqltable_it` 无论传什么 DSN 都使用共享 `reconcile_it`；同实例上不要并发跑。当前执行记录和 mock 边界见 [VERIFICATION](../VERIFICATION.md) 与 [故障注入说明](../docs/operations.md#故障注入--fault-injection)，本页下方是既有历史参考结果，不能替代本轮验证。
 
 ## 参考结果
 
