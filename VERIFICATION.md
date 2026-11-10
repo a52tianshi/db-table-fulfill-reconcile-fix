@@ -511,7 +511,27 @@ go test -count=1 -run 'TestTxInsertRejectsCompensatingValuesLengths|TestTxUpdate
 
 真 MySQL 上错位的两行确实被提交了（`Amount:123`、`UpdatedAt:42` 来自串位的列值）。还原后（即工作区代码）单测 `--- PASS: TestTxInsertRejectsCompensatingValuesLengths`，集成测试见 11.2。
 
-### 11.5 本轮未验证 / Not verified in this round
+### 11.5 GitHub Actions 实跑 / Remote CI：success
+
+```sh
+git push upstream HEAD:main v0.4.0
+gh run watch 42737649373 -R a52tianshi/db-table-fulfill-reconcile-fix --exit-status   # exit 0
+```
+
+```text
+success
+701f1c31ac8bdfa2692a4b9445d1daf7756ed699
+checks (1.22.x) success 2026-11-10T01:42:13Z → 2026-11-10T01:43:30Z
+checks (1.25.4) success 2026-11-10T01:42:14Z → 2026-11-10T01:43:26Z
+```
+
+- Run: https://github.com/a52tianshi/db-table-fulfill-reconcile-fix/actions/runs/42737649373 （commit `701f1c3` = tag `v0.4.0`）
+- 两个 job 的所有步骤（build / vet / race / lint / MySQL integration / 跨页 e2e）均 ✓。集成步骤日志：1.22.x 与 1.25.4 各 22 行 `--- PASS`（18 个顶层 + 4 个子测试）、0 行 `--- SKIP`；e2e：1.22.x `[verify] old=10799 new=10799 ... missing=0 different=0 misrouted=0 extra=0` + `E2E PASS`，1.25.4 `old=7281 new=7281 ...` + `E2E PASS`。
+- CI 环境是 MySQL 8.4 service、**无延迟注入**；20ms 下的证据只来自本地 11.1–11.3。
+- 非阻塞告警：checkout@v4 / setup-go@v5 的 Node 20 弃用提示；ubuntu-latest 将迁移到 Ubuntu 26 的提示。均不影响结果。
+- 本节是 tag 之后追加的纯文档提交，tag `v0.4.0` 指向的就是 CI 验证过的 `701f1c3`。
+
+### 11.6 本轮未验证 / Not verified in this round
 
 - `LATENCY_MS=20` 由 `run.sh` **自建** dblatency 代理的路径：本轮没有跑（本轮只用了外部 3315 代理）；README / testing.md 中该命令是用法说明，不是本轮执行记录。agy 分支的 `757566d` 修过该路径，本轮未复测。
 - 30000 行默认 skew、百万行规模：未在 20ms 下跑。
