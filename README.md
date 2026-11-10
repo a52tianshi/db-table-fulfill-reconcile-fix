@@ -28,6 +28,14 @@ mysql -u root -e "CREATE DATABASE IF NOT EXISTS reconcile_codex"
 E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
 ```
 
+模拟 20ms 网络往返（脚本自建 `dblatency` 代理，writer / 对账 / 校验全部经代理；20ms 下约 3 分钟量级）：
+
+```sh
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" LATENCY_MS=20 DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+已有外部延迟代理时不设 `LATENCY_MS`，把 DSN 指向代理端口即可；集成测试的延迟跑法与 `reconcile_it` 的 GET_LOCK 语义见 [docs/testing.md](docs/testing.md)。
+
 小数据必须指定 `DIST=uniform`：默认 `skew` 为覆盖分页边界要求至少 27009 行。缩小参数仅用于快速验证，全量脚本默认值未改。2000 行 uniform 与 30000 行默认 skew 均以 `E2E PASS` 结束。预期输出（行数取决于数据规模）：
 
 ```text
@@ -270,11 +278,11 @@ Policy: r.Policy{Missing: r.Fix, Different: r.Warn}
 ./scripts/check.sh integration  # 真实 MySQL 集成；任何 Skip 都视为门禁失败
 ```
 
-完整 e2e 使用第 0 节的专用 DSN 命令。`mysqltable_it` 会把 DSN 的库名强制改为共享的 `reconcile_it` 并重建测试表，不能靠 DSN 隔离，勿并发执行。CI 在独立 MySQL 8.4 service 上运行相同命令，另跑小规模 e2e；本轮本机可执行结果与尚未验证的版本见 [VERIFICATION.md](VERIFICATION.md)。
+完整 e2e 使用第 0 节的专用 DSN 命令。`mysqltable_it` 会把 DSN 的库名强制改为共享的 `reconcile_it` 并重建测试表，不能靠 DSN 隔离；`TestMain` 用 `GET_LOCK` 让同实例上并发启动的 suite 排队串行，连上 MySQL 却拿不到锁会直接失败。CI 在独立 MySQL 8.4 service 上运行相同命令，另跑小规模 e2e；本轮本机可执行结果与尚未验证的版本见 [VERIFICATION.md](VERIFICATION.md)。
 
 ## 10. 发布与运维 / Release and operations
 
-- 当前版本为 `v0.3.0`（基线 `v0.1.0`）。公开 API 签名与数据面语义未变，但 `NewPair` 的配置校验加严、冲突错误包装改为 `%w`，升级前请对照 [CHANGELOG 的迁移说明](CHANGELOG.md)。
+- 当前版本为 `v0.4.0`（基线 `v0.1.0`）。公开 API 签名未变（新增导出变量 `mysqltable.ErrInvalidValues`），但有行为变更：Values 长度不匹配返回 `ErrInvalidValues`、Route 越界返回 `ErrMisrouted`、Insert 表内按 KeyLess 升序、`IsTransient` 只认首个错误码头、`ScanPage` 拒绝 `limit<=0`、游标绑定表名。升级前请对照 [CHANGELOG 的 v0.4.0 行为变更表](CHANGELOG.md)。
 - [运维手册](docs/operations.md)：权限、双写条件、限流与停止、故障注入、恢复、切流前验证。
 - [SECURITY](SECURITY.md)：报告数据损坏与凭据风险；[CONTRIBUTING](CONTRIBUTING.md)：本地与 CI 一致的检查命令。
 - [SELF-ASSESS](SELF-ASSESS.md)：六项证据评分、未完成项与自我质疑。验证记录不替代业务自己的容量与恢复演练。

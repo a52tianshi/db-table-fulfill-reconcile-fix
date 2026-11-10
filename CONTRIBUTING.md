@@ -22,7 +22,7 @@ mysql -u root -e "CREATE DATABASE IF NOT EXISTS reconcile_it"
 E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" ./scripts/check.sh integration
 ```
 
-集成测试硬编码改用 `reconcile_it`，会重建测试表；同实例上须串行跑，不能通过 E2E_MYSQL_DSN 改为专属库。原测试连接不上会 Skip，发布脚本将 Skip 视作失败。缩小参数仅用于快速验证，全量脚本默认值未改；小规模 uniform 不覆盖 skew 的全部分页边界。
+集成测试硬编码改用 `reconcile_it`，会重建测试表，不能通过 E2E_MYSQL_DSN 改为专属库；`TestMain` 用 `GET_LOCK` 让同实例上的多个 suite 自动排队串行，连上 MySQL 却拿不到锁会直接失败（见 docs/testing.md）。原测试连接不上会 Skip，发布脚本将 Skip 视作失败。缩小参数仅用于快速验证，全量脚本默认值未改；小规模 uniform 不覆盖 skew 的全部分页边界。
 
 ## 提交与评审 / Review
 

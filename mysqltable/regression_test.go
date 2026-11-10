@@ -190,6 +190,35 @@ func TestOldSideScanAlsoRejectsWrongShard(t *testing.T) {
 	}
 }
 
+// Ported from the codex self-test branch: the first row is short and the
+// second row is long, so the total argument count (1+3 = 2 rows x 2 columns)
+// matches the multi-row INSERT placeholders and database/sql cannot catch it.
+// Without per-row validation this executes and writes shifted columns.
+func TestTxInsertRejectsCompensatingValuesLengths(t *testing.T) {
+	ctx := context.Background()
+	var executed []string
+	p := scriptPair(t, func(q string, _ []driver.NamedValue) ([][]driver.Value, error) {
+		executed = append(executed, q)
+		return nil, nil
+	})
+	p.cfg.InsertChunk = 2
+	p.cfg.Schema.Values = func(o order) []any {
+		if o.ID == 1 {
+			return []any{o.ID} // short: 1 value for 2 columns
+		}
+		return []any{o.ID, o.UserID, int64(9)} // long: 3 values for 2 columns
+	}
+	err := p.Repairer().InTx(ctx, func(tx reconcile.Tx[order, key]) error {
+		return tx.Insert(ctx, []order{{ID: 1, UserID: 1}, {ID: 2, UserID: 1}})
+	})
+	if !errors.Is(err, ErrInvalidValues) || IsTransient(err) {
+		t.Fatalf("per-row Values length mismatch must fail permanently with ErrInvalidValues: %v", err)
+	}
+	if len(executed) != 0 {
+		t.Fatalf("malformed rows must not execute SQL even if total args match: %q", executed)
+	}
+}
+
 func TestTxUpdateAndInsertRejectWrongValuesLength(t *testing.T) {
 	ctx := context.Background()
 	t.Run("update too few values returns error without panic", func(t *testing.T) {
@@ -210,6 +239,9 @@ func TestTxUpdateAndInsertRejectWrongValuesLength(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error when Values returns fewer items than Columns")
 		}
+		if !errors.Is(err, ErrInvalidValues) || IsTransient(err) {
+			t.Fatalf("want permanent ErrInvalidValues, got %v", err)
+		}
 		if executed != 0 {
 			t.Fatalf("expected 0 SQL executions, got %d", executed)
 		}
@@ -227,6 +259,9 @@ func TestTxUpdateAndInsertRejectWrongValuesLength(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected error when Values returns more items than Columns")
+		}
+		if !errors.Is(err, ErrInvalidValues) || IsTransient(err) {
+			t.Fatalf("want permanent ErrInvalidValues, got %v", err)
 		}
 		if executed != 0 {
 			t.Fatalf("expected 0 SQL executions, got %d", executed)
@@ -252,6 +287,9 @@ func TestTxUpdateAndInsertRejectWrongValuesLength(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected error when Values length mismatches Columns in Insert")
+		}
+		if !errors.Is(err, ErrInvalidValues) || IsTransient(err) {
+			t.Fatalf("want permanent ErrInvalidValues, got %v", err)
 		}
 		if executed != 0 {
 			t.Fatalf("expected 0 SQL executions, got %d", executed)

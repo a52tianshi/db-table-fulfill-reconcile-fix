@@ -19,6 +19,8 @@
 - 引擎串行、有界攒批；配置 `ScanPageSize`、`BatchSize`、`TxBatchSize` 和适配器 `InChunk` / `InsertChunk` 共同控制 SQL 数量、锁时长和峰值内存。`MemoryLimit` 只限制估算缓存批，不是 RSS；驱动、扫描页和查询结果另占内存。
 - 库没有每秒行数限流或跨任务互斥。由调用方限制调度频率、连接池与同时运行的任务数量；先按代表性数据观察 DB CPU、锁等待、连接数和延迟，再调整批大小。
 - **连接与锁超时必须配在 DSN 上**：库没有单步/单事务超时；`ctx` 会传给 `BeginTx` / `QueryContext` / `ExecContext`，是否中断取决于驱动——go-sql-driver 会在取消时中断语句并关闭连接，因此**在 COMMIT 途中取消属于提交结果未知**，处置同下文“停止与恢复”第 4 步。生产 DSN 至少设置 `readTimeout`、`writeTimeout`、`timeout`（连接），并把 `innodb_lock_wait_timeout` 调到业务可接受的上限，否则慢 SQL 或网络半开会长期持有行锁、阻塞线上双写。
+- **高 RTT 下的持锁时长（v0.4.0 实测）**：Different 修复是**每行一个 UPDATE 往返**（`Tx.Update` 逐行执行），复核事务的持锁时间 ∝ `TxBatchSize × RTT`。20ms RTT 代理下，100 行全 Different、同一分片、`TxBatchSize=100`：Run 9.97s，复核事务持锁约 9.8s；同期线上写入方（`innodb_lock_wait_timeout=1`）对被锁老表行 UPDATE，实测 5 次 `1205 Lock wait timeout`（直连无延迟时同一 Run 19ms）。即每行约 100ms（多个往返）。处置：延迟环境把 `TxBatchSize` 调到 **10–20**，并确保线上 `innodb_lock_wait_timeout` 大于 `TxBatchSize × 单行往返耗时`；根治需要 `Tx` 支持批量 UPDATE（接口变更，v0.4.0 未做）。
+- **半开连接与 ctx 取消（v0.4.0 实测）**：go-sql-driver 在 ctx 取消时只关闭本端 socket。若中间件 / 代理 / 网络吞掉 FIN（半开连接），MySQL 看不到断开，被取消的复核事务以 `Sleep` 状态继续持有行锁，直到 `wait_timeout`（默认 28800s）或 TCP keepalive 探测失败；后续 Run 与线上写会持续 1205。库在 ctx 取消后无法保证服务端回滚。建议：迁移专用账号设置较小的会话 `wait_timeout`（如在 DSN 加 `wait_timeout=600` 系统变量参数，按最长单事务耗时留余量），并在客户端/中间件开启 TCP keepalive；取消后可用 `information_schema.innodb_trx` 检查是否有残留事务。（测试用 `dblatency` 代理已在 v0.4.0 修为任一方向断开即关闭两端。）
 - 监控 Run error、完成耗时、`Retries` 增长、Extra、连续多轮 Missing/Different、`Inserted/Updated` 和双写错误；指标阈值由业务容量演练确定，本库没有通用 SLA。
 - `Suspected` 与 `Stale` 在并发双写时可以增加；`Warned` 不等于告警投递成功数。Progress 同步执行，回调阻塞会延迟扫描；使用有界异步投递并明确队列满策略。
 - `LogNotifier` 会包含 key / 差异信息。不要无筛选记录完整业务行、DSN 或凭据。可靠通知需业务持久化 outbox / 恢复协议；重复 Run 不会保证重放已经修复的 Finding。
@@ -55,4 +57,4 @@ E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" ./e2e/bin/e2e reconcile
 
 ## 版本与支持 / Compatibility
 
-发布、deprecation 与迁移规则见 [CHANGELOG](../CHANGELOG.md)。根 module 的 Go 下限为 1.22，且不捆绑 SQL 驱动；e2e 是独立 module，已有 MySQL 驱动仅用于验证。CI 配置 Go 1.22.x / 1.25.4 与 MySQL 8.4，本次验证环境为 Go 1.25.4 / MySQL 9.7.1，真实 MySQL 集成、2000 行 uniform 与 30000 行 skew 的 e2e 已通过。不能据此承诺所有 MySQL 版本或 MariaDB 兼容。
+发布、deprecation 与迁移规则见 [CHANGELOG](../CHANGELOG.md)。根 module 的 Go 下限为 1.22，且不捆绑 SQL 驱动；e2e 是独立 module，已有 MySQL 驱动仅用于验证。CI 配置 Go 1.22.x / 1.25.4 与 MySQL 8.4；v0.4.0 本地验证在 20ms RTT 代理下进行（命令与输出见 VERIFICATION 第 11 节）。不能据此承诺所有 MySQL 版本或 MariaDB 兼容。

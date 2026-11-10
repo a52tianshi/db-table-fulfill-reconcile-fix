@@ -222,6 +222,9 @@ func TestUpdateAndInsertRejectMismatchedValuesAndReleaseLocks(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error from short Values, got nil (report=%v)", rep)
 		}
+		if !errors.Is(err, mysqltable.ErrInvalidValues) || mysqltable.IsTransient(err) {
+			t.Fatalf("want permanent ErrInvalidValues, got %v", err)
+		}
 		if rep.Retries != 0 {
 			t.Fatalf("schema/values mismatch must not be retried, retries=%d", rep.Retries)
 		}
@@ -259,11 +262,51 @@ func TestUpdateAndInsertRejectMismatchedValuesAndReleaseLocks(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error from long Values, got nil (report=%v)", rep)
 		}
+		if !errors.Is(err, mysqltable.ErrInvalidValues) || mysqltable.IsTransient(err) {
+			t.Fatalf("want permanent ErrInvalidValues, got %v", err)
+		}
 		got, err := newPair(t, db).New().Lookup(context.Background(), []store.Key{store.KeyOf(orig)})
 		if err != nil || got[store.KeyOf(orig)].Remark != "stale" {
 			t.Fatalf("new row was modified despite invalid Values: %+v err=%v", got, err)
 		}
 	})
+}
+
+// Ported from the codex self-test branch. One row is short (6 Values) and the
+// next is long (8 Values): the total placeholder count of the 2-row INSERT
+// matches, so database/sql and MySQL accept it and, without per-row
+// validation, commit shifted columns (b.Remark "123" lands in amount, etc.).
+func TestInsertRejectsCompensatingValuesLengths(t *testing.T) {
+	db := openDB(t)
+	schema := store.Schema()
+	schema.Values = func(o store.Order) []any {
+		if o.OrderID == base+1 {
+			return o.Args()[:6]
+		}
+		return append(o.Args(), int64(42))
+	}
+	p, err := mysqltable.NewPair(mysqltable.PairConfig[store.Order, store.Key]{
+		DB: db, Schema: schema,
+		Old:       mysqltable.Single[store.Key]("it_old"),
+		New:       mysqltable.Mod("it_new_%d", shards, func(k store.Key) int64 { return k.UserID }),
+		TxOptions: &sql.TxOptions{Isolation: sql.LevelReadCommitted},
+		InChunk:   3, InsertChunk: 2, IsDuplicate: mysqltable.IsDuplicateKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := order(1, 1), order(2, 1)
+	b.Remark = "123" // shifted into a BIGINT column it is still valid SQL
+	err = p.Repairer().InTx(context.Background(), func(tx r.Tx[store.Order, store.Key]) error {
+		return tx.Insert(context.Background(), []store.Order{a, b})
+	})
+	if !errors.Is(err, mysqltable.ErrInvalidValues) || mysqltable.IsTransient(err) {
+		t.Errorf("each row must have seven Values even when total args match: %v", err)
+	}
+	rows, _, scanErr := newPair(t, db).New().ScanPage(context.Background(), nil, 10)
+	if scanErr != nil || len(rows) != 0 {
+		t.Fatalf("malformed insert must leave no rows: rows=%+v err=%v", rows, scanErr)
+	}
 }
 
 func TestSnapshotInsertFromShardedOldSortsKeysAgainstOnlineWriter(t *testing.T) {

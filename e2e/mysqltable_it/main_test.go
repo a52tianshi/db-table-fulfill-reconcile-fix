@@ -47,8 +47,14 @@ func withSuiteLock(m *testing.M) (int, error) {
 	}
 	defer conn.Close()
 	var got int
-	if err := conn.QueryRowContext(context.Background(), "SELECT GET_LOCK(?, 900)", suiteLock).Scan(&got); err != nil || got != 1 {
-		return m.Run(), nil // best effort: lock unavailable must not hide the tests
+	// MySQL is reachable from here on. Failing to take the suite lock must
+	// fail the run: continuing unlocked would let two suites rebuild the
+	// shared reconcile_it tables under each other and produce false results.
+	if err := conn.QueryRowContext(context.Background(), "SELECT GET_LOCK(?, 900)", suiteLock).Scan(&got); err != nil {
+		return 0, fmt.Errorf("GET_LOCK(%q): %w", suiteLock, err)
+	}
+	if got != 1 {
+		return 0, fmt.Errorf("GET_LOCK(%q) returned %d: suite lock not acquired within 900s", suiteLock, got)
 	}
 	defer func() {
 		_, _ = conn.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", suiteLock)

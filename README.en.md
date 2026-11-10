@@ -28,6 +28,14 @@ Build and run concurrent dual writes, three reconciliation passes and independen
 E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
 ```
 
+To simulate a 20 ms network round trip (the script builds and starts the `dblatency` proxy; writer, reconcile and verify all go through it; expect roughly 3 minutes):
+
+```sh
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" LATENCY_MS=20 DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+If a latency proxy already exists, leave `LATENCY_MS` unset and point the DSN at the proxy port. Integration tests under latency and the `reconcile_it` GET_LOCK semantics are described in [docs/testing.md](docs/testing.md).
+
 For 2,000 rows, `DIST=uniform` is necessary: the default skew fixtures require at least 27,009 rows. These reduced parameters are for quick validation only; the full script defaults are unchanged. Both 2,000-row uniform and 30,000-row default skew runs obtained `E2E PASS` in this rerun.
 
 Actual terminal excerpt from the uniform run with a writable Go cache:
@@ -185,12 +193,12 @@ The root contains the engine, interfaces, configuration, comparators, retry, pro
 ./scripts/check.sh integration
 ```
 
-The first runs both modules' build/vet, database-free race tests and lint (gofmt plus shell syntax, not staticcheck). The second requires real MySQL and fails if any test skips. The existing integration tests force the shared database name `reconcile_it` and recreate tables; do not run them concurrently on a shared instance. The quickstart e2e uses the dedicated DSN above.
+The first runs both modules' build/vet, database-free race tests and lint (gofmt plus shell syntax, not staticcheck). The second requires real MySQL and fails if any test skips. The integration tests force the shared database name `reconcile_it` and recreate tables; `TestMain` takes a MySQL `GET_LOCK` so concurrent suites on one instance queue up, and fails if MySQL is reachable but the lock cannot be taken. The quickstart e2e uses the dedicated DSN above.
 
-CI configures Go 1.22.x / 1.25.4 and an isolated MySQL 8.4 service, with the same scripts and a small e2e workload. CI has not been remotely executed during this session. Current measurements, uncovered paths and mock boundaries are in [testing](docs/testing.md) and [VERIFICATION](VERIFICATION.md).
+CI configures Go 1.22.x / 1.25.4 and an isolated MySQL 8.4 service, with the same scripts and a small e2e workload. Remote CI run results per release are recorded in VERIFICATION. Current measurements, uncovered paths and mock boundaries are in [testing](docs/testing.md) and [VERIFICATION](VERIFICATION.md).
 
 ## 10. Release and operations
 
-Current version is v0.3.0 (baseline v0.1.0). Public API signatures and data semantics are unchanged, but `NewPair` validation is stricter and conflict errors now wrap with `%w`; check the migration note in [CHANGELOG](CHANGELOG.md) before upgrading. See [CHANGELOG](CHANGELOG.md) for compatibility/deprecation policy, [SECURITY](SECURITY.md) for reporting and deployment boundaries, [CONTRIBUTING](CONTRIBUTING.md) for checks and [SELF-ASSESS](SELF-ASSESS.md) for scores and unresolved work.
+Current version is v0.4.0 (baseline v0.1.0). Public API signatures are unchanged (one new exported variable, `mysqltable.ErrInvalidValues`), but behavior changed: a `Schema.Values` length mismatch returns `ErrInvalidValues`; `Route(k)` outside `Tables()` returns `ErrMisrouted`; `Insert` writes each table in ascending `KeyLess` order; `IsTransient` only parses the first `Error <digits>` header; `ScanPage` rejects `limit <= 0`; cursors are bound to their table. Read the v0.4.0 behavior-change table in [CHANGELOG](CHANGELOG.md) before upgrading. See [CHANGELOG](CHANGELOG.md) for compatibility/deprecation policy, [SECURITY](SECURITY.md) for reporting and deployment boundaries, [CONTRIBUTING](CONTRIBUTING.md) for checks and [SELF-ASSESS](SELF-ASSESS.md) for scores and unresolved work.
 
 Existing offline demonstrations: [guide](guide.html), [batch scan](batch-scan-demo.html), [single-thread flow](single-thread-state-flow.html), with [maintenance notes](docs/visuals/README.md). They illustrate the design, including capabilities that are explicitly not implemented.

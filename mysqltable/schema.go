@@ -195,8 +195,10 @@ func IsDuplicateKey(err error) bool { return err != nil && mysqlErrno(err, "1062
 // (1213), lock wait timeout (1205), server gone / lost connection
 // (2006, 2013), too many connections (1040), and broken connections.
 // Anything else (syntax, missing table, duplicate key...) is not retried.
+// ErrMisrouted (including Route(key) outside Tables()) and ErrInvalidValues
+// are configuration/data errors and are never transient.
 func IsTransient(err error) bool {
-	if err == nil || errors.Is(err, ErrMisrouted) || errors.Is(err, errInvalidValues) {
+	if err == nil || errors.Is(err, ErrMisrouted) || errors.Is(err, ErrInvalidValues) {
 		return false
 	}
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {

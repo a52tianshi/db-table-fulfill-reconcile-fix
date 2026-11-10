@@ -1,6 +1,6 @@
 # 测试清单与覆盖口径 / Test scope and coverage
 
-验证日期：2026-11-09。命令、真实输出和失败记录统一见 [VERIFICATION](../VERIFICATION.md)。当前业务执行代码保持不变；新增的是契约回归测试和发布检查入口。
+验证日期：2026-11-09（v0.3.x 各节）；v0.4.0 的 20ms 延迟验证为 2026-11-10。命令、真实输出和失败记录统一见 [VERIFICATION](../VERIFICATION.md)。当前业务执行代码保持不变；新增的是契约回归测试和发布检查入口。
 
 ## 关键路径 / Critical paths
 
@@ -14,8 +14,41 @@
 | 重试耗尽、查询部分失败不能视为缺失、取消 | TestEveryStepIsRetried，TestRetriesExhaustedStopsRun，TestLookupErrorNeverMeansMissing，TestCancelIsNotRetried | 无 DB race 通过 |
 | 已提交整批计数与通知失败 | TestNotifyFailureCountsWholeCommittedBatch / AllConfirmedExtras / DoesNotCountUncommittedChunks | 无 DB race 通过，明确通知不是可靠投递 |
 | 错片、锁前排序、超大整数和比较器边界 | mysqltable/regression_test.go，TestWithinInt64Boundaries，TestStructRejectsPromotedFieldConfiguration | 无 DB race 通过，SQL 层使用自定义 database/sql 测试驱动 |
-| 真正的行锁、SQL 事务回滚、主键冲突与高水位 | e2e/mysqltable_it 中 11 个测试 | 本轮 11 个顶层测试及 2 个子测试通过，无 Skip |
+| 真正的行锁、SQL 事务回滚、主键冲突与高水位、Values 逐行校验、路由越界、Insert 排序防死锁 | e2e/mysqltable_it（v0.4.0 起 17+ 个顶层测试） | v0.4.0 在 20ms 代理下的实跑结果见 VERIFICATION 第 11 节 |
 | 并发双写、三轮收敛、独立逐行核验 | e2e/run.sh → writer / reconcile / verify | 2000 行 uniform、30000 行 skew 均三轮收敛并通过独立逐行校验 |
+
+## 延迟注入与共享集成库 / Latency injection and the shared IT database
+
+v0.4.0 起所有发布验证都在 20ms RTT 下跑（见 VERIFICATION 第 11 节）。两种用法：
+
+**(a) 已有外部延迟代理（不自建代理）**：DSN 直接指向代理端口即可，`LATENCY_MS` 不设。例如主控在 3315 上提供 20ms 代理：
+
+```sh
+export E2E_MYSQL_DSN="root@tcp(127.0.0.1:3315)/reconcile_v040"
+./scripts/check.sh integration
+ROWS=2000 USERS=1000 DIST=uniform WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+**(b) 由 e2e/run.sh 自建代理**：设置 `LATENCY_MS=<整数毫秒>`（可选 `LATENCY_PORT`，默认 3307）。脚本构建 `e2e/bin/dblatency`，监听 `127.0.0.1:$LATENCY_PORT`、转发到 DSN 里的 `tcp(host:port)`，然后把 DSN 的地址改写为代理地址，writer / reconcile / verify 全部经代理；日志在 `e2e/logs/dblatency.log`，脚本退出时杀掉代理。DSN 必须是 `tcp(host:port)` 形式，否则退出码 2。
+
+```sh
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3306)/reconcile_codex" LATENCY_MS=20 LATENCY_PORT=3307 \
+  DIST=uniform ROWS=2000 USERS=1000 WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+集成测试不经 run.sh，需要手动起代理再把 DSN 指过去：
+
+```sh
+(cd e2e && go run ./cmd/dblatency -listen 127.0.0.1:3307 -target 127.0.0.1:3306 -rtt 20ms) &
+E2E_MYSQL_DSN="root@tcp(127.0.0.1:3307)/reconcile_codex" ./scripts/check.sh integration
+```
+
+`dblatency` 每个方向延迟 `rtt/2`（`-jitter` 可加随机抖动），且**任一方向断开即关闭两端**：客户端 ctx 取消关闭 socket 时，MySQL 端会话同步断开、事务回滚。不要用不传播关闭的代理做取消类测试，否则服务端会残留持锁事务直到 `wait_timeout`（真实生产的半开连接同理，见 operations）。
+
+**`reconcile_it` 与 GET_LOCK**：`e2e/mysqltable_it` 无视 DSN 里的库名，固定在共享库 `reconcile_it` 上 DROP/重建 `it_old`、`it_new_*`。`TestMain` 在专用连接上 `SELECT GET_LOCK('db_table_fulfill_reconcile_it_suite', 900)`，整个包跑完才释放（进程崩溃时随连接自动释放）。因此同一实例上可以并发启动多个 suite，它们会排队串行执行。语义：
+
+- MySQL 连不上 → 不加锁，各测试自行 Skip（`check.sh integration` 把 Skip 判为门禁失败）；
+- 连上了但 `GET_LOCK` 出错或 900s 内拿不到 → **直接失败退出**（v0.4.0 起；之前是不加锁继续跑，会与别的 suite 互相破坏表）。
 
 ## 覆盖率 / Coverage
 

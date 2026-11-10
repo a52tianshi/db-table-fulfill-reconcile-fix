@@ -1,5 +1,7 @@
 # 验证记录 / Verification
 
+> **版本标注**：第 1–10 节是 `v0.2.0`–`v0.3.x` 的历史记录（2026-11-09，直连 MySQL，无延迟注入），原样保留，其中的数字不代表 v0.4.0。**v0.4.0 的验证见第 11 节**（2026-11-10，全部经 20ms RTT 代理）。
+
 日期：2026-11-09（Asia/Singapore）。分支 `release/v0.2.0`，由 `codex/clarity` 合入三方评审裁决项后的发布分支；基线 tag `v0.1.0`（74c845f）。
 
 **总体验收：pass。** build / vet / race、两个 module 的单测、11 个真实 MySQL 集成测试、e2e 2000 行 uniform 与 30000 行 skew 全部通过，命令与输出见下文。注意：`ROWS=2000` 必须显式传 `DIST=uniform`，默认 skew 数据集为覆盖分页边界要求至少 27009 行，这是既有测试数据的约束，不是缺陷。
@@ -388,3 +390,129 @@ checks (1.25.4)   success  09:49:37Z → 09:51:04Z
 | 校验加严不影响签名与返回类型 | `Router` 接口未变 | `go build ./...`、`go vet ./...` |
 
 变异检查：删掉 `validateRouter` 里的 nil-route 分支后，`TestNewPairRejectsNilRouteFunc` 立刻失败（"expected an error for a nil route function"），还原后通过。
+
+## 11. v0.4.0（20ms RTT）/ v0.4.0 under 20 ms latency
+
+日期：2026-11-10。分支 `release/v0.4.0`（基底 = agy 自测分支 `0892cdf`，合并项 A–D 见 CHANGELOG v0.4.0）。环境：Go 1.25.4 darwin/arm64，MySQL 9.7.1。所有数据库命令都经主控提供的 20ms 延迟代理 `127.0.0.1:3315`（本节命令**未设** `LATENCY_MS`，即“不自建代理”的用法）。
+
+```sh
+export E2E_MYSQL_DSN="root@tcp(127.0.0.1:3315)/reconcile_v040"
+```
+
+### 11.0 代理延迟抽查
+
+```sh
+python3 -c "print('SELECT 1;'*50)" > q50.sql
+/usr/bin/time -p mysql -h127.0.0.1 -P3315 -uroot -N < q50.sql > /dev/null
+```
+
+```text
+real 1.28
+```
+
+50 次查询 + 连接握手约 54 个往返，≈ 24ms/往返，与 20ms 注入一致。
+
+### 11.1 build / vet / race / lint：pass
+
+```sh
+./scripts/check.sh
+```
+
+```text
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix	2.098s
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix/memtable	1.584s
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix/mysqltable	2.408s
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/internal/store	1.531s
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/cmd/dblatency	1.900s
+?   	github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/cmd/e2e	[no test files]
+lint PASS (gofmt + bash -n, per script)
+```
+
+退出码 0（这是文档修改完成后、在最终代码树上的复跑；此前一次同命令也是 0）。
+
+### 11.2 真实 MySQL 集成：pass（18 个顶层测试，0 Skip）
+
+```sh
+./scripts/check.sh integration
+```
+
+```text
+--- PASS: TestScanPageUnevenShards (1.69s)
+--- PASS: TestScanStopsAtHighWaterMark (0.73s)
+--- PASS: TestLookupRoutesAndConfirmsAbsence (0.64s)
+--- PASS: TestTxInsertUpdateConflictRollback (1.92s)
+--- PASS: TestLockHoldsRowLocks (1.77s)
+--- PASS: TestRunConvergesWithOddSizes (56.24s)
+--- PASS: TestWrongShardStopsRunWithoutDeleting (1.26s)
+    --- PASS: TestWrongShardStopsRunWithoutDeleting/extra (0.52s)
+    --- PASS: TestWrongShardStopsRunWithoutDeleting/duplicate (0.74s)
+--- PASS: TestCorrectlyRoutedExtraWarnsAndRemains (1.37s)
+--- PASS: TestLockSortsAcrossChunksAgainstOnlineWriter (1.01s)
+--- PASS: TestHighWaterIsKeyBoundNotTemporalSnapshot (0.75s)
+--- PASS: TestWrongShardInLockRollsBackEarlierUpdate (0.92s)
+--- PASS: TestUpdateAndInsertRejectMismatchedValuesAndReleaseLocks (1.31s)
+    --- PASS: .../short_Values_does_not_panic_under_lock_and_rolls_back (0.39s)
+    --- PASS: .../long_Values_rejected_instead_of_silent_truncation (0.43s)
+--- PASS: TestInsertRejectsCompensatingValuesLengths (1.02s)
+--- PASS: TestSnapshotInsertFromShardedOldSortsKeysAgainstOnlineWriter (3.47s)
+--- PASS: TestRouteReturningUnlistedTableStopsWithoutWriting (0.56s)
+--- PASS: TestRealMySQLLostCommitAckOnSnapshotInsertRecoversWithConcurrentUpdate (1.23s)
+--- PASS: TestRealMySQLLockWaitTimeoutRetriedAndConverges (2.48s)
+--- PASS: TestMidRunTimeoutKillAndRerunIdempotent (3.62s)
+PASS
+ok  	github.com/a52tianshi/db-table-fulfill-reconcile-fix/e2e/mysqltable_it	83.679s
+```
+
+`grep -c '^--- PASS:'` = 18，`grep -c -- '--- SKIP'` = 0，退出码 0。（`TestMain` 修改后：连上 MySQL 而 `GET_LOCK` 失败会直接退出；本次拿锁成功。下面 11.4 的变异运行在本次 suite 运行期间启动，包耗时 72.4s 而该测试本身 0.60s，绝大部分时间在等 suite 锁，侧面说明锁生效。）
+
+### 11.3 e2e：2000 行 uniform、并发双写、20ms：pass
+
+```sh
+ROWS=2000 USERS=1000 DIST=uniform WARMUP=2 GAP=3 ./e2e/run.sh
+```
+
+```text
+[init] seed=1794274706142425000 old=2000 users=1000 preCopied=0 preDirty=0 in 6.113s
+[run1] insert=batch-snapshot injected=47 (scan=1 lookup=0 txBegin=5 txPreCommit=4 notify=37) scanned old=2024 new=2473 suspected=2000 stale=0 | missing=2000 different=0 extra=0 | inserted=2000 updated=0 warned=0 | retries=47 42.489s
+[run2] insert=batch-snapshot injected=17 (scan=5 lookup=1 txBegin=3 txPreCommit=4 notify=4) scanned old=2560 new=3186 suspected=250 stale=91 | missing=0 different=159 extra=0 | inserted=0 updated=159 warned=0 | retries=17 55.54s
+[run2] PASS: no missing/extra; 159 stale snapshot rows overwritten
+[run3] insert=batch-snapshot injected=12 (scan=5 lookup=0 txBegin=4 txPreCommit=3 notify=0) scanned old=3228 new=3634 suspected=61 stale=61 | missing=0 different=0 extra=0 | inserted=0 updated=0 warned=0 | retries=12 37.396s
+[run3] PASS: nothing to repair (61 stale candidates resolved by reread)
+[writer] stopped inserts=1680 updates=4112 failed=0
+[verify] new shard sizes: empty=0 below1000=100 min=28 max=50
+[verify] old=3680 new=3680 checked=3680 missing=0 different=0 misrouted=0 extra=0 | 15.875s
+[verify] PASS: old and new tables are identical
+
+E2E PASS
+... ./e2e/run.sh  2.70s user 3.33s system 3% cpu 2:43.67 total
+```
+
+退出码 0。**如实记录一次中断**：第一次尝试在 run3 期间被我的工具后台时限（600s，unit 门禁 + e2e 串在同一条命令里）发 SIGTERM 杀掉，日志末尾 `[reconcile] FAIL: recheck tx (1 keys): context canceled` 来自这次外部终止，不是产品失败；之后单独重跑一次，即上面这份输出。
+
+### 11.4 合并项 B 的变异检查：先红后绿
+
+在仓库副本（不动工作区）里把 `mysqltable/pair.go` 中 `Tx.Insert` 的逐行 `t.p.values(...)` 校验换成直接 `args = append(args, Schema.Values(row)...)`：
+
+```sh
+go test -count=1 -run 'TestTxInsertRejectsCompensatingValuesLengths|TestTxUpdateAndInsertRejectWrongValuesLength' -v ./mysqltable
+(cd e2e && go test -count=1 -run TestInsertRejectsCompensatingValuesLengths -v ./mysqltable_it)
+```
+
+```text
+    regression_test.go:215: per-row Values length mismatch must fail permanently with ErrInvalidValues: <nil>
+--- FAIL: TestTxInsertRejectsCompensatingValuesLengths (0.00s)
+    regression_test.go:289: expected error when Values length mismatches Columns in Insert
+--- FAIL: TestTxUpdateAndInsertRejectWrongValuesLength (0.00s)
+
+    regression_test.go:304: each row must have seven Values even when total args match: <nil>
+    regression_test.go:308: malformed insert must leave no rows: rows=[{OrderID:1 UserID:1 Status:2 Amount:123 Remark:1 Version:2 UpdatedAt:42} {OrderID:4611686018427387905 UserID:1 Status:1 Amount:1 Remark:r Version:1 UpdatedAt:4611686018427387906}] err=<nil>
+--- FAIL: TestInsertRejectsCompensatingValuesLengths (0.60s)
+```
+
+真 MySQL 上错位的两行确实被提交了（`Amount:123`、`UpdatedAt:42` 来自串位的列值）。还原后（即工作区代码）单测 `--- PASS: TestTxInsertRejectsCompensatingValuesLengths`，集成测试见 11.2。
+
+### 11.5 本轮未验证 / Not verified in this round
+
+- `LATENCY_MS=20` 由 `run.sh` **自建** dblatency 代理的路径：本轮没有跑（本轮只用了外部 3315 代理）；README / testing.md 中该命令是用法说明，不是本轮执行记录。agy 分支的 `757566d` 修过该路径，本轮未复测。
+- 30000 行默认 skew、百万行规模：未在 20ms 下跑。
+- 20ms 下 Different 持锁 9.8s / 5 次 1205 的数字来自 claude 自测报告（`t2/claude/TEST-REPORT.md` P2），本轮未复测。

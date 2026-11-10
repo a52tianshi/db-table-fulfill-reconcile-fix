@@ -10,6 +10,42 @@
 | `v0.2.3` | 错误分类英文版 |
 | `v0.2.4` | 回填 GitHub Actions 实跑结果 |
 | `v0.3.0` | `NewPair` 校验收紧（nil route / 重复表名 / 空路由） |
+| `v0.4.0` | 20ms 延迟自测合并：Values 逐行长度校验（`ErrInvalidValues`）、路由越界拒绝、Insert 按 KeyLess 排序防死锁、错误码首头解析、ScanPage/游标校验、dblatency 断开传播、集成测试锁 fail-closed |
+
+## v0.4.0 — 20ms 延迟自测合并 / Latency self-test merge
+
+### 行为变更（升级前必读）/ Behavior changes — read before upgrading
+
+公开 API 签名不变；新增导出变量 `mysqltable.ErrInvalidValues`。以下是**可观察行为**的变化，原来“能跑”的错误配置现在会报错终止：
+
+| # | 场景 | v0.3.x 行为 | v0.4.0 行为 | 调用方如何识别 |
+|---|---|---|---|---|
+| 1 | `Schema.Values(row)` 返回长度 ≠ `len(Schema.Columns)` | Update：过短在持锁事务里 panic，过长被静默截断；Insert 多行：只检查总参数数，一短一长“补偿”时错位写入（列值串位后照常提交） | `Tx.Insert` 逐行、`Tx.Update` 本行在发 SQL 前校验，返回 `ErrInvalidValues`，事务回滚、锁释放 | `errors.Is(err, mysqltable.ErrInvalidValues)`；`IsTransient` 为 false，不重试 |
+| 2 | `Router.Route(k)` 返回不在 `Tables()` 里的表 | Lookup 查未登记表（可能得到假 clean），Insert/Update 写进未登记表（幽灵写入） | Lookup / Lock / Insert / Update 在发 SQL 前返回 `*MisroutedError`（`Expected=""`），Run 终止 | `errors.Is(err, mysqltable.ErrMisrouted)` / `errors.As(err, &*MisroutedError)`；**不新增** `ErrInvalidRoute`，路由越界与错片共用 `ErrMisrouted` 一个 sentinel |
+| 3 | `Tx.Insert` 的写入顺序 | 按调用方给的行序切 chunk（分片老表扫出来可能是 `[2,1]`），与按升序加锁的线上写入方交叉 → 真 MySQL 1213 死锁 | 每张目标表内先按 `Schema.KeyLess` 稳定升序排序再切 chunk | 无需改代码；自定义 `Tx` 实现也应遵守同一顺序 |
+| 4 | `IsTransient` / `IsDuplicateKey` 解析错误串 | 子串匹配，业务数据里出现 `Error 1213`、`i/o timeout` 等字样可被误判 | 只解析错误串里**第一个** `Error <digits>` 头；已识别出服务端错误码后不再落入 `i/o timeout` / `unexpected EOF` 等子串匹配 | 无需改代码；依赖旧误判重试的调用方会看到更早失败 |
+| 5 | `ScanPage(ctx, cursor, limit)` 的 `limit <= 0` | panic | 返回错误（`limit must be > 0` 类参数错误，非 transient） | 检查 error |
+| 6 | 游标 | 未绑定表名，跨侧/跨表复用游标可能静默从错误位置继续 | 游标绑定表名；跨侧/跨表游标返回 foreign cursor 错误（永久错误，`IsTransient` 为 false） | 不要在 Old / New 或不同 Pair 之间复用游标 |
+
+### Fixed
+
+- `mysqltable`：上表 1–6。`ErrInvalidValues` 为新增导出 sentinel（原为未导出的 `errInvalidValues`），godoc 说明它是配置错误、不可重试；`ErrMisrouted` 的 godoc 写明它同时覆盖“Route 越界”。
+- `e2e/cmd/dblatency`：任一方向断开即关闭两端。原来客户端 ctx 取消关闭 socket 后，代理不向 MySQL 传播关闭，服务端事务以 `Sleep` 持锁存活到 `wait_timeout`，导致后续测试 1205。
+- `e2e/mysqltable_it` 的 `TestMain`：MySQL 连不上仍让测试自行 Skip（发布门禁把 Skip 当失败）；**连上了但 `GET_LOCK` 拿不到（出错或 900s 超时）直接失败退出**，不再“best effort 不加锁继续跑”。
+
+### Tests
+
+- 新增（移植自 codex 自测分支）：`Insert` 多行“各行 Values 一短一长、参数总数刚好凑齐”的错位写入用例——单测 `mysqltable.TestTxInsertRejectsCompensatingValuesLengths`、真 MySQL `TestInsertRejectsCompensatingValuesLengths`；已做变异检查（去掉 Insert 逐行校验 → 两者均红）。
+- 既有 Values 长度用例的断言收紧为 `errors.Is(err, ErrInvalidValues) && !IsTransient(err)`（原为 `err != nil`）。
+- 20ms RTT 延迟代理下的 unit / integration / e2e 结果见 VERIFICATION 第 11 节。
+
+### 已知未做 / Not done
+
+- Different 修复仍是每行一个 UPDATE 往返，持锁时间 ∝ `TxBatchSize × RTT`（见 docs/operations.md）；批量 UPDATE 需要 `Tx` 接口变更，本版不做。
+- 百万行规模未测；COMMIT 结果未知的确定性窗口仍需调用方重跑确认（见 operations“停止与恢复”）。
+
+
+## v0.2.0 – v0.3.0
 
 以下小节是 `v0.2.0`–`v0.3.0` 的合并记录（同一天发布，未按 tag 拆节）。
 
